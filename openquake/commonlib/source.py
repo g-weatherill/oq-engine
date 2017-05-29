@@ -626,6 +626,18 @@ class CompositeSourceModel(collections.Sequence):
                 dd[src.source_id].append(src)
         return {srcs[0] for source_id, srcs in dd.items() if len(srcs) > 1}
 
+    def remove_dupl_sources(self):
+        """
+        Remove duplicated sources from the source groups.
+
+        :returns: the set of duplicated sources
+        """
+        dups = self.get_dupl_sources()
+        for src_group in self.src_groups:
+            src_group.sources = [src for src in src_group
+                                 if src.source_id not in dups]
+        return dups
+
     def get_num_sources(self):
         """
         :returns: the total number of sources in the model
