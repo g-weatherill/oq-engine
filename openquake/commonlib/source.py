@@ -615,6 +615,17 @@ class CompositeSourceModel(collections.Sequence):
                     sources.append(src)
         return sources
 
+    def get_dupl_sources(self):
+        """
+        Extracts duplicated sources, i.e. sources with the same source_id in
+        different source groups.
+        """
+        dd = collections.defaultdict(list)
+        for src_group in self.src_groups:
+            for src in src_group:
+                dd[src.source_id].append(src)
+        return {srcs[0] for source_id, srcs in dd.items() if len(srcs) > 1}
+
     def get_num_sources(self):
         """
         :returns: the total number of sources in the model
