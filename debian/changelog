@@ -1,3 +1,42 @@
+  [Michele Simionato]
+  * Raised a clear error if the user does not set the `calculation_mode`
+  * Made it is possible to pass the hdf5 full path to the DataStore class
+  * Made it possible to use CELERY_RESULT_BACKEND != 'rpc://'
+
+  [Michele Simionato, Daniele Viganò]
+  * Merged the `oq-hazardlib` repository into `oq-engine`.
+    The `python-oq-hazardlib` package is now provided by `python-oq-engine`
+
+  [Michele Simionato]
+  * Added CSV exports for the agg_curve outputs
+  * Fixed a bug in `oq export hcurves-rlzs --exports hdf5`
+  * Restored the parameter sites_per_tile with a default of 20,000, i.e.
+    tiling starts automatically if there are more than 20,000 sites
+  * Better error message for invalid exposures
+  * Removed the deprecated XML outputs of the risk calculators
+  * Added an end point `v1/calc/XXX/oqparam` to extract the calculation
+    parameters as a JSON dictionary
+  * Fixed the excessive logic tree reduction in event based calculators
+  * Improved the command `oq db`
+  * Fixed an encoding bug when logging a filename with a non-ASCII character
+  * Fixed a bug when exporting a GMF with `ruptureId=0`
+  * Added a parameter `disagg_outputs` to specify the kind of disaggregation
+    outputs to export
+  * Raised an early error if the consequence model is missing some taxonomies
+  * Restored the tiling functionality in the classical calculator; to enable
+    it, set `num_tiles` in the job.ini file
+  * If there are no statistical hazard curves to compute, do not transfer
+    anything
+  * Fixed a small bug in `oq plot` and added a test
+
+  [Daniele Viganò]
+  * Added `collectstatic` and `createsuperuser` subcommands to the
+    `oq webui` command
+  * Added a `local_settings.py.pam` template to use PAM as the authentication
+    provider for API and WebUI
+  * Now the command `oq webui start` tries to open a browser tab
+    with the WebUI loaded
+
 python-oq-engine (2.4.0-0~precise01) precise; urgency=low
 
   [Michele Simionato]

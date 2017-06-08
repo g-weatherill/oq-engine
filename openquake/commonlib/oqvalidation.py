@@ -56,6 +56,7 @@ class OqParam(valid.ParamSet):
     conditional_loss_poes = valid.Param(valid.probabilities, [])
     continuous_fragility_discretization = valid.Param(valid.positiveint, 20)
     description = valid.Param(valid.utf8_not_empty)
+    disagg_outputs = valid.Param(valid.disagg_outputs, None)
     distance_bin_width = valid.Param(valid.positivefloat)
     mag_bin_width = valid.Param(valid.positivefloat)
     export_dir = valid.Param(valid.utf8, '.')
@@ -125,6 +126,7 @@ class OqParam(valid.ParamSet):
     max_site_model_distance = valid.Param(valid.positivefloat, 5)  # by Graeme
     sites = valid.Param(valid.NoneOr(valid.coordinates), None)
     sites_disagg = valid.Param(valid.NoneOr(valid.coordinates), [])
+    sites_per_tile = valid.Param(valid.positiveint, 20000)
     sites_slice = valid.Param(valid.simple_slice, (None, None))
     specific_assets = valid.Param(valid.namelist, [])
     taxonomies_from_model = valid.Param(valid.boolean, False)
@@ -151,6 +153,8 @@ class OqParam(valid.ParamSet):
 
     def __init__(self, **names_vals):
         super(OqParam, self).__init__(**names_vals)
+        if 'calculation_mode' not in names_vals:
+            raise ValueError('Missing calculation_mode in the .ini file!')
         self.risk_investigation_time = (
             self.risk_investigation_time or self.investigation_time)
         if ('intensity_measure_types_and_levels' in names_vals and

@@ -27,9 +27,8 @@ import sys
 import ast
 import mock
 import time
-import operator
 
-from openquake.baselib import parallel, general
+from openquake.baselib import parallel
 from openquake.baselib.general import humansize, AccumDict
 from openquake.baselib.python3compat import encode
 from openquake.commonlib import readinput, source
@@ -60,23 +59,6 @@ def count_eff_ruptures(sources, srcfilter, gsims, param, monitor):
             acc.calc_times.append((src.source_id, len(sites), dt))
     acc.eff_ruptures = {acc.grp_id: count}
     return acc
-
-
-def no_prefilter(csm, src_filter):
-    """
-    Disable source prefiltering in CompositeSourceModel
-    """
-    csm.set_weights()
-    return csm
-
-
-def split_sources(csm, sources, src_filter, maxweight):
-    """
-    Fast replacement of CompositeSourceModel.split_sources
-    """
-    csm.add_infos(sources)
-    return general.block_splitter(
-        sources, maxweight, weight=operator.attrgetter('weight'))
 
 
 class ReportWriter(object):
@@ -190,9 +172,7 @@ def build_report(job_ini, output_dir=None):
     # some taken is care so that the real calculation is not run:
     # the goal is to extract information about the source management only
     p = mock.patch.object
-    with p(PSHACalculator, 'core_task', count_eff_ruptures), \
-         p(source.CompositeSourceModel, 'filter', no_prefilter), \
-         p(source.CompositeSourceModel, 'split_sources', split_sources):
+    with p(PSHACalculator, 'core_task', count_eff_ruptures):
         if calc.pre_calculator == 'event_based_risk':
             # compute the ruptures only, not the risk
             calc.pre_calculator = 'event_based_rupture'
