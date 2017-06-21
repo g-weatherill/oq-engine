@@ -443,6 +443,7 @@ class CompositeRiskModel(collections.Mapping):
                 dic[taxonomy].append((sid, group[taxonomy], epsgetter))
         imti = {imt: i for i, imt in enumerate(hazard_getter.imts)}
         with mon_hazard:
+            hazard_getter.init()
             hazard = hazard_getter.get_hazard()
         with mon_risk:
             for out in self._gen_outputs(hazard, imti, dic):
@@ -464,11 +465,11 @@ class CompositeRiskModel(collections.Mapping):
                         continue
                     if len(haz) == 0:  # no hazard for this site
                         continue
-                    elif isinstance(haz, numpy.ndarray):  # event_based
+                    elif isinstance(haz, numpy.ndarray):  # gmf
                         eids = haz['eid']
                         gmvs = haz['gmv']
                         data = {i: (gmvs[:, i], eids) for i in rangeI}
-                    else:
+                    else:  # poe
                         data = haz
                     out = [None] * len(self.lti)
                     for lti, i in enumerate(rangeI):
@@ -488,8 +489,6 @@ class CompositeRiskModel(collections.Mapping):
 
 class HazardGetter(object):
     """
-    :param kind:
-        kind of HazardGetter; can be 'poe' or 'gmf'
     :param grp_id:
         source group ID
     :param rlzs_by_gsim:
@@ -502,9 +501,9 @@ class HazardGetter(object):
     :param imts:
         a list of IMT strings
     """
-    def __init__(self, kind, grp_id, rlzs_by_gsim, hazards_by_rlz, sids, imts):
-        assert kind in ('poe', 'gmf'), kind
-        self.kind = kind
+    kind = 'poe'
+
+    def __init__(self, grp_id, rlzs_by_gsim, hazards_by_rlz, sids, imts):
         self.grp_id = grp_id
         self.rlzs_by_gsim = rlzs_by_gsim
         self.sids = sids
@@ -517,18 +516,7 @@ class HazardGetter(object):
                 for idx, sid in enumerate(sids):
                     datadict[idx] = lst = [None for imt in imts]
                     for imti, imt in enumerate(self.imts):
-                        if kind == 'poe':
-                            lst[imti] = hazards_by_imt[imt][sid]  # imls
-                        else:  # gmf
-                            lst[imti] = e = hazards_by_imt[sid, :, imti]
-                            num_events = len(e)
-
-        if kind == 'gmf':
-            # now some attributes set for API compatibility with the GmfGetter
-            # number of ground motion fields
-            self.eids = numpy.arange(num_events, dtype=F32)
-            # dictionary rlzi -> array(imts, events, nbytes)
-            self.gmdata = AccumDict(accum=numpy.zeros(len(self.imts) + 2, F32))
+                        lst[imti] = hazards_by_imt[imt][sid]  # imls
 
     def init(self):  # for API compatibility
         pass
@@ -659,16 +647,22 @@ class GmfDataGetter(GmfGetter):
     """
     Extracts a dictionary of GMVs from the datastore
     """
-    def __init__(self, gmf_data, grp_id, rlzs_by_gsim, start=0, stop=None):
+    def __init__(self, gmf_data, rlzs_by_gsim, grp_id=0, start=0, stop=None):
         self.gmf_data = gmf_data
-        self.grp_id = grp_id
         self.rlzs_by_gsim = rlzs_by_gsim
+        self.grp_id = grp_id
         self.start = start
         self.stop = stop
         self.gmf_data_dt = gmf_data[next(iter(gmf_data))].dtype
 
     def init(self):
-        pass
+        # attributes set for API compatibility with the GmfGetter
+        # number of ground motion fields
+        # self.eids = numpy.arange(num_events, dtype=F32)
+        # dictionary rlzi -> array(imts, events, nbytes)
+        I, = self.gmf_data_dt['gmv'].shape
+        self.gmdata = AccumDict(accum=numpy.zeros(I + 2, F32))
+        self.gmv_eid_dt = numpy.dtype([('gmv', (F32, (I,))), ('eid', U64)])
 
     def gen_gmv(self):
         """
@@ -694,7 +688,7 @@ class GmfDataGetter(GmfGetter):
         records = []
         for grp_id in grp_ids:
             rlzs_by_gsim = rlzs_assoc.get_rlzs_by_gsim(grp_id)
-            getter = cls(gmf_data, grp_id, rlzs_by_gsim)
+            getter = cls(gmf_data, rlzs_by_gsim, grp_id)
             for rec in getter.gen_gmv():
                 if eid is None or eid == rec['eid']:
                     records.append(rec)

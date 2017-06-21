@@ -641,11 +641,15 @@ class RiskCalculator(HazardCalculator):
                         for asset in assets:
                             reduced_eps[asset.ordinal] = eps[asset.ordinal]
                 # build the riskinputs
-                ri = riskinput.RiskInput(
-                    riskinput.HazardGetter(
-                        kind, 0, {None: rlzs},
-                        hazards_by_rlz, indices, list(imtls)),
-                    reduced_assets, reduced_eps)
+                if kind == 'gmf':  # for scenario calculators
+                    rlzs_by_gsim = self.rlzs_assoc.get_rlzs_by_gsim(0)
+                    getter = riskinput.GmfDataGetter(
+                        self.datastore['gmf_data'], rlzs_by_gsim)
+                    getter.imts = list(imtls)
+                else:  # for classical calculators
+                    getter = riskinput.HazardGetter(
+                        0, {None: rlzs}, hazards_by_rlz, indices, list(imtls))
+                ri = riskinput.RiskInput(getter, reduced_assets, reduced_eps)
                 if ri.weight > 0:
                     riskinputs.append(ri)
             assert riskinputs

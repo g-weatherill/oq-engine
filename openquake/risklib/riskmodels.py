@@ -389,7 +389,7 @@ class ProbabilisticEventBased(RiskModel):
         :param assets:
            a list of assets on the same site and with the same taxonomy
         :param gmvs_eids:
-           a composite array of E elements with fields 'gmv' and 'eid'
+           a pair of arrays of E elements
         :param epsgetter:
            a callable returning the correct epsilons for the given gmvs
         :returns:
@@ -486,7 +486,8 @@ class Scenario(RiskModel):
         self.insured_losses = insured_losses
         self.time_event = time_event
 
-    def __call__(self, loss_type, assets, ground_motion_values, epsgetter):
+    def __call__(self, loss_type, assets, gmvs_eids, epsgetter):
+        ground_motion_values, eids = gmvs_eids
         epsilons = epsgetter(None, None)
         values = get_values(loss_type, assets, self.time_event)
         ok = ~numpy.isnan(values)
@@ -535,17 +536,18 @@ class Damage(RiskModel):
         self.taxonomy = taxonomy
         self.risk_functions = fragility_functions
 
-    def __call__(self, loss_type, assets, gmvs, _eps=None):
+    def __call__(self, loss_type, assets, gmvs_eids, _eps=None):
         """
         :param loss_type: the loss type
         :param assets: a list of N assets of the same taxonomy
-        :param gmvs: an array of E elements
+        :param gmvs_eids: a pair of arrays of E elements
         :param _eps: dummy parameter, unused
         :returns: an array of N assets and an array of N x E x D elements
 
         where N is the number of points, E the number of events
         and D the number of damage states.
         """
+        gmvs, eids = gmvs_eids
         n = len(assets)
         ffs = self.risk_functions[loss_type]
         damages = numpy.array(
