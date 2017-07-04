@@ -784,50 +784,6 @@ def get_sitecol_assetcol(oqparam, exposure):
     return sitecol, assetcol
 
 
-def get_mesh_csvdata(csvfile, imts, num_values, validvalues):
-    """
-    Read CSV data in the format `IMT lon lat value1 ... valueN`.
-
-    :param csvfile:
-        a file or file-like object with the CSV data
-    :param imts:
-        a list of intensity measure types
-    :param num_values:
-        dictionary with the number of expected values per IMT
-    :param validvalues:
-        validation function for the values
-    :returns:
-        the mesh of points and the data as a dictionary
-        imt -> array of curves for each site
-    """
-    number_of_values = dict(zip(imts, num_values))
-    lon_lats = {imt: set() for imt in imts}
-    data = AccumDict()  # imt -> list of arrays
-    check_imt = valid.Choice(*imts)
-    for line, row in enumerate(csv.reader(csvfile, delimiter=' '), 1):
-        try:
-            imt = check_imt(row[0])
-            lon_lat = valid.longitude(row[1]), valid.latitude(row[2])
-            if lon_lat in lon_lats[imt]:
-                raise DuplicatedPoint(lon_lat)
-            lon_lats[imt].add(lon_lat)
-            values = validvalues(' '.join(row[3:]))
-            if len(values) != number_of_values[imt]:
-                raise ValueError('Found %d values, expected %d' %
-                                 (len(values), number_of_values[imt]))
-        except (ValueError, DuplicatedPoint) as err:
-            raise err.__class__('%s: file %s, line %d' % (err, csvfile, line))
-        data += {imt: [numpy.array(values)]}
-    points = lon_lats.pop(imts[0])
-    for other_imt, other_points in lon_lats.items():
-        if points != other_points:
-            raise ValueError('Inconsistent locations between %s and %s' %
-                             (imts[0], other_imt))
-    lons, lats = zip(*sorted(points))
-    mesh = geo.Mesh(numpy.array(lons), numpy.array(lats))
-    return mesh, {imt: numpy.array(lst) for imt, lst in data.items()}
-
-
 def get_gmfs(oqparam):
     """
     :param oqparam:
