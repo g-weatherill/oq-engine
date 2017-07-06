@@ -665,7 +665,7 @@ def export_asset_loss_table(ekey, dstore):
     if oq.insured_losses:
         for lt in loss_types:
             dtlist.append((lt + '_ins', F32))
-    lrs_dt = numpy.dtype([('rlzi', U16), ('losses', dtlist)])
+    lrs_dt = numpy.dtype([('rlzi', U16), ('eid', U64), ('losses', dtlist)])
     fname = dstore.export_path('%s.%s' % ekey)
     monitor = performance.Monitor(key, fname)
     aids = range(len(assetcol))

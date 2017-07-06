@@ -113,14 +113,16 @@ def _aggregate(outputs, compositemodel, taxid, agg, idx, result, param):
     lrs_idx = result['lrs_idx']  # aid -> indices
     n = 0
     all_ratios = []
-    for aid, agroup in itertools.groupby(data, operator.itemgetter(0)):
-        for r, rgroup in itertools.groupby(agroup, operator.itemgetter(1)):
-            for e, egroup in itertools.groupby(
-                    rgroup, operator.itemgetter(2)):
+    by_aid = operator.itemgetter(0)
+    by_rlz = operator.itemgetter(1)
+    by_eid = operator.itemgetter(2)
+    for aid, agroup in itertools.groupby(data, by_aid):
+        for r, rgroup in itertools.groupby(agroup, by_rlz):
+            for e, egroup in itertools.groupby(rgroup, by_eid):
                 ratios = numpy.zeros(L * I, F32)
-                for rec in egroup:
+                for rec in egroup:  # rec[3] is li, rec[4] is ratio
                     ratios[rec[3]] = rec[4]
-                all_ratios.append((r, ratios))
+                all_ratios.append((r, e, ratios))
         n1 = len(all_ratios)
         lrs_idx[aid].append((n, n1))
         n = n1
@@ -150,7 +152,8 @@ def event_based_risk(riskinput, riskmodel, param, monitor):
     taxid = {t: i for i, t in enumerate(sorted(assetcol.taxonomies))}
     T = len(taxid)
     R = riskinput.hazard_getter.num_rlzs
-    param['lrs_dt'] = numpy.dtype([('rlzi', U16), ('ratios', (F32, (L * I,)))])
+    param['lrs_dt'] = numpy.dtype(
+        [('rlzi', U16), ('eid', U64), ('ratios', (F32, (L * I,)))])
     idx = dict(zip(eids, range(E)))
     agg = AccumDict(accum=numpy.zeros((E, L * I), F32))  # r -> array
     result = dict(agglosses=AccumDict(), assratios=[],
