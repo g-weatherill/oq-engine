@@ -88,7 +88,7 @@ class ZhaoEtAl2006Asc(GMPE):
         """
         # extracting dictionary of coefficients specific to required
         # intensity measure type.
-        C = self.COEFFS_ASC[imt]
+        C = self.COEFFS[imt]
 
         # mean value as given by equation 1, p. 901, without considering the
         # interface and intraslab terms (that is SI, SS, SSL = 0) and the
@@ -200,7 +200,7 @@ class ZhaoEtAl2006Asc(GMPE):
     #: Coefficient table obtained by joining table 4 (except columns for
     #: SI, SS, SSL), table 5 (both at p. 903) and table 6 (only columns for
     #: QC WC TauC), p. 907.
-    COEFFS_ASC = CoeffsTable(sa_damping=5, table="""\
+    COEFFS = CoeffsTable(sa_damping=5, table="""\
     IMT    a     b         c       d      e        FR     CH     C1     C2     C3     C4     sigma   QC      WC      tauC
     pga    1.101 -0.00564  0.0055  1.080  0.01412  0.251  0.293  1.111  1.344  1.355  1.420  0.604   0.0     0.0     0.303
     0.05   1.076 -0.00671  0.0075  1.060  0.01463  0.251  0.939  1.684  1.793  1.747  1.814  0.640   0.0     0.0     0.326
@@ -255,7 +255,7 @@ class ZhaoEtAl2006SInter(ZhaoEtAl2006Asc):
         """
         # extracting dictionary of coefficients specific to required
         # intensity measure type.
-        C = self.COEFFS_ASC[imt]
+        C = self.COEFFS[imt]
         C_SINTER = self.COEFFS_SINTER[imt]
 
         # mean value as given by equation 1, p. 901, without considering the
@@ -338,7 +338,7 @@ class ZhaoEtAl2006SSlab(ZhaoEtAl2006Asc):
         """
         # extracting dictionary of coefficients specific to required
         # intensity measure type.
-        C = self.COEFFS_ASC[imt]
+        C = self.COEFFS[imt]
         C_SSLAB = self.COEFFS_SSLAB[imt]
 
         # to avoid singularity at 0.0 (in the calculation of the
@@ -476,7 +476,7 @@ class ZhaoEtAl2006SSlabNSHMP2014(ZhaoEtAl2006SSlab):
         """
         # extracting dictionary of coefficients specific to required
         # intensity measure type.
-        C = self.COEFFS_ASC[imt]
+        C = self.COEFFS[imt]
         C_SSLAB = self.COEFFS_SSLAB[imt]
 
         # to avoid singularity at 0.0 (in the calculation of the
@@ -563,7 +563,7 @@ class ZhaoEtAl2006SInterCascadia(ZhaoEtAl2006SInter):
         """
         # extracting dictionary of coefficients specific to required
         # intensity measure type.
-        C = self.COEFFS_ASC[imt]
+        C = self.COEFFS[imt]
         C_SINTER = self.COEFFS_SINTER[imt]
         C_SF = COEFFS_SITE_FACTORS[imt]
 
@@ -612,7 +612,7 @@ class ZhaoEtAl2006SSlabCascadia(ZhaoEtAl2006SSlab):
         """
         # extracting dictionary of coefficients specific to required
         # intensity measure type.
-        C = self.COEFFS_ASC[imt]
+        C = self.COEFFS[imt]
         C_SSLAB = self.COEFFS_SSLAB[imt]
         C_SF = COEFFS_SITE_FACTORS[imt]
 

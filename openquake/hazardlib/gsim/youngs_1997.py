@@ -98,7 +98,7 @@ class YoungsEtAl1997SInter(GMPE):
         idx_soil = sites.vs30 < self.ROCK_VS30
 
         if idx_rock.any():
-            C = self.COEFFS_ROCK[imt]
+            C = self.COEFFS[imt]
             self._compute_mean(C, self.CONSTS['A1_rock'],
                                self.CONSTS['A2_rock'], self.CONSTS['A3_rock'],
                                self.CONSTS['A4_rock'], self.CONSTS['A5_rock'],
@@ -161,7 +161,7 @@ class YoungsEtAl1997SInter(GMPE):
 
     #: Coefficient table containing rock coefficients,
     #: taken from table 2, p. 67
-    COEFFS_ROCK = CoeffsTable(sa_damping=5, table="""\
+    COEFFS = CoeffsTable(sa_damping=5, table="""\
     IMT   C1        C2         C3       C4       C5
     pga       0.000      0.0000    -2.552    1.45    -0.1
     0.075     1.275      0.0000    -2.707    1.45    -0.1

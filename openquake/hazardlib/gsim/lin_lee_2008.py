@@ -88,7 +88,7 @@ class LinLee2008SInter(GMPE):
         idx_soil = sites.vs30 < self.ROCK_VS30
 
         if idx_rock.any():
-            C = self.COEFFS_ROCK[imt]
+            C = self.COEFFS[imt]
             self._compute_mean(C, rup.mag, dists.rhypo, rup.hypo_depth, mean,
                                idx_rock)
             self._compute_std(C, stddevs, idx_rock)
@@ -117,7 +117,7 @@ class LinLee2008SInter(GMPE):
             stddev[idx] += C['sigma']
 
     #: Coefficient table for rock sites, see table 3 page 227.
-    COEFFS_ROCK = CoeffsTable(sa_damping=5, table="""\
+    COEFFS = CoeffsTable(sa_damping=5, table="""\
     IMT      C1       C2        C3         C4         C5         C6        C7        sigma
     pga     -2.5000    1.205    -1.90499    0.51552    0.63255    0.0075    0.275    0.5268
     0.01    -2.5000    1.205    -1.89500    0.51552    0.63255    0.0075    0.275    0.5228

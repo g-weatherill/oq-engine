@@ -102,7 +102,7 @@ class AtkinsonBoore2003SInter(GMPE):
         """
         # extracting dictionary of coefficients specific to required
         # intensity measure type.
-        C = self.COEFFS_SINTER[imt]
+        C = self.COEFFS[imt]
 
         # cap magnitude values at 8.5, see page 1709
         mag = rup.mag
@@ -111,7 +111,7 @@ class AtkinsonBoore2003SInter(GMPE):
 
         # compute PGA on rock (needed for site amplification calculation)
         G = 10 ** (1.2 - 0.18 * mag)
-        pga_rock = self._compute_mean(self.COEFFS_SINTER[PGA()], G, mag,
+        pga_rock = self._compute_mean(self.COEFFS[PGA()], G, mag,
                                       rup.hypo_depth, dists.rrup, sites.vs30,
                                       # by passing pga_rock > 500 the soil
                                       # amplification is 0
@@ -123,8 +123,8 @@ class AtkinsonBoore2003SInter(GMPE):
         # of the erratum. SA for 0.4s and 0.2s is computed and a weighted sum
         # is returned
         if isinstance(imt, SA) and imt.period in (0.2, 0.4):
-            C04 = self.COEFFS_SINTER[SA(period=0.4, damping=5.0)]
-            C02 = self.COEFFS_SINTER[SA(period=0.2, damping=5.0)]
+            C04 = self.COEFFS[SA(period=0.4, damping=5.0)]
+            C02 = self.COEFFS[SA(period=0.2, damping=5.0)]
             mean04 = self._compute_mean(C04, G, mag, rup.hypo_depth,
                                         dists.rrup, sites.vs30, pga_rock, imt)
             mean02 = self._compute_mean(C02, G, mag, rup.hypo_depth,
@@ -248,7 +248,7 @@ class AtkinsonBoore2003SInter(GMPE):
                 stddevs.append(np.log(10 ** C['s2']) + np.zeros(num_sites))
         return stddevs
 
-    COEFFS_SINTER = CoeffsTable(sa_damping=5, table="""\
+    COEFFS = CoeffsTable(sa_damping=5, table="""\
     IMT      c1          c2          c3           c4          c5          c6          c7          sigma       s1          s2
     pga      2.991000    0.035250    0.007590    -0.002060   0.190000    0.240000    0.290000    0.230000    0.200000    0.110000
     0.0400   2.875300    0.070520    0.010040    -0.002780   0.150000    0.200000    0.200000    0.260000    0.220000    0.140000
@@ -287,7 +287,7 @@ class AtkinsonBoore2003SSlab(AtkinsonBoore2003SInter):
         """
         # extracting dictionary of coefficients specific to required
         # intensity measure type.
-        C = self.COEFFS_SSLAB[imt]
+        C = self.COEFFS[imt]
 
         # cap magnitude values at 8.0, see page 1709
         mag = rup.mag
@@ -296,7 +296,7 @@ class AtkinsonBoore2003SSlab(AtkinsonBoore2003SInter):
 
         # compute PGA on rock (needed for site amplification calculation)
         G = 10 ** (0.301 - 0.01 * mag)
-        pga_rock = self._compute_mean(self.COEFFS_SSLAB[PGA()], G, mag,
+        pga_rock = self._compute_mean(self.COEFFS[PGA()], G, mag,
                                       rup.hypo_depth, dists.rrup, sites.vs30,
                                       # by passing pga_rock > 500 the soil
                                       # amplification is 0
@@ -317,7 +317,7 @@ class AtkinsonBoore2003SSlab(AtkinsonBoore2003SInter):
 
         return mean, stddevs
 
-    COEFFS_SSLAB = CoeffsTable(sa_damping=5, table="""\
+    COEFFS = CoeffsTable(sa_damping=5, table="""\
     IMT      c1         c2         c3         c4         c5          c6         c7         sigma      s1        s2
     pga     -0.04713    0.69090    0.01130    -0.00202    0.19000    0.24000    0.29000    0.27000    0.23000    0.14000
     0.0400   0.50697    0.63273    0.01275    -0.00234    0.15000    0.20000    0.20000    0.25000    0.24000    0.07000
@@ -448,7 +448,7 @@ class AtkinsonBoore2003SSlabCascadia(AtkinsonBoore2003SSlab):
     in ``hazgridXnga2.f`` Fortran code available at:
     http://earthquake.usgs.gov/hazards/products/conterminous/2008/software/
     """
-    COEFFS_SSLAB = CoeffsTable(sa_damping=5, table="""\
+    COEFFS = CoeffsTable(sa_damping=5, table="""\
     IMT      c1      c2         c3         c4         c5          c6         c7         sigma      s1        s2
     pga     -0.25    0.69090    0.01130    -0.00202    0.19000    0.24000    0.29000    0.27000    0.23000    0.14000
     0.0400   0.23    0.63273    0.01275    -0.00234    0.15000    0.20000    0.20000    0.25000    0.24000    0.07000
