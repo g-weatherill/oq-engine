@@ -181,12 +181,12 @@ class SkarlatoudisEtAl2013SInter(SkarlatoudisEtAl2013SSlab):
         """
         # In this formulation the ARC term is 0 for backarc, and 1 for forearc
         arc = np.ones(sites.backarc.shape, dtype=float)
-        return (C["c31"] * np.log10(dists.rhypo) +
+        return (self.CONSTANTS["c31"] * np.log10(dists.rhypo) +
             C["c41"] * (1.0 - arc) * (dists.rhypo - self.CONSTANTS["rref"]) +
             C["c42"] * arc * (dists.rhypo - self.CONSTANTS["rref"]))
 
     COEFFS = CoeffsTable(sa_damping=5, table="""\
-    imt        c1    c2      c41      c42   c51   c52 sigma   tau   phi
+    imt        c1    c2      c41      c42   c61   c62 sigma   tau   phi
     pgv     2.783 1.186 -0.00122 -0.00064 0.232 0.428 0.261 0.095 0.277
     pga     3.945 0.974 -0.00172 -0.00099 0.189 0.707 0.330 0.257 0.418
     0.010   3.950 0.972 -0.00172 -0.00099 0.187 0.708 0.331 0.261 0.421
