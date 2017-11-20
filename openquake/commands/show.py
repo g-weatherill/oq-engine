@@ -66,7 +66,7 @@ def show(what='contents', calc_id=-1, extra=()):
         rows = []
         for calc_id in datastore.get_calc_ids(datadir):
             try:
-                ds = datastore.read(calc_id)
+                ds = read(calc_id)
                 oq = ds['oqparam']
                 cmode, descr = oq.calculation_mode, oq.description
             except:
@@ -105,7 +105,7 @@ def show(what='contents', calc_id=-1, extra=()):
     elif what in ds:
         obj = ds[what]
         if hasattr(obj, 'value'):  # an array
-            print(write_csv(io.StringIO(), obj.value))
+            print(write_csv(io.BytesIO(), obj.value).decode('utf8'))
         else:
             print(obj)
     else:

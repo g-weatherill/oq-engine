@@ -27,6 +27,7 @@ import imp
 import copy
 import math
 import socket
+import random
 import operator
 import warnings
 import tempfile
@@ -669,7 +670,8 @@ class DictArray(collections.Mapping):
     """
     def __init__(self, imtls):
         self.dt = dt = numpy.dtype(
-            [(str(imt), F64, len(imls) if hasattr(imls, '__len__') else 1)
+            [(str(imt), F64,
+              (len(imls),) if hasattr(imls, '__len__') else (1,))
              for imt, imls in sorted(imtls.items())])
         self.slicedic, num_levels = _slicedict_n(dt)
         self.array = numpy.zeros(num_levels, F64)
@@ -873,7 +875,7 @@ def socket_ready(hostport):
         sock.close()
     return False if exc else True
 
-port_candidates = set(range(1920, 2000))
+port_candidates = list(range(1920, 2000))
 
 
 def _get_free_port():
@@ -884,7 +886,8 @@ def _get_free_port():
     # never considered free again, even if it is. These restrictions as
     # acceptable for usage in the tests, but only in that case.
     while port_candidates:
-        port = port_candidates.pop()
+        port = random.choice(port_candidates)
+        port_candidates.remove(port)
         if not socket_ready(('127.0.0.1', port)):  # no server listening
             return port  # the port is free
     raise RuntimeError('No free ports in the range 1920:2000')

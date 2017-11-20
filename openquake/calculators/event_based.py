@@ -98,7 +98,7 @@ def compute_ruptures(sources, src_filter, gsims, param, monitor):
             continue
         num_ruptures += src.num_ruptures
         num_occ_by_rup = sample_ruptures(
-            src, param['ses_per_logic_tree_path'], param['samples'],
+            src, param['ses_per_logic_tree_path'], sources.samples,
             param['seed'])
         # NB: the number of occurrences is very low, << 1, so it is
         # more efficient to filter only the ruptures that occur, i.e.
@@ -454,7 +454,7 @@ class EventBasedCalculator(ClassicalCalculator):
             ruptures = ruptures_by_grp[grp_id]
             if not ruptures:
                 continue
-            rlzs_by_gsim = self.rlzs_assoc.rlzs_by_gsim[grp_id]
+            rlzs_by_gsim = self.rlzs_assoc.get_rlzs_by_gsim(grp_id)
             for block in block_splitter(ruptures, oq.ruptures_per_block):
                 samples = samples_by_grp[grp_id]
                 getter = GmfGetter(rlzs_by_gsim, block, self.sitecol,

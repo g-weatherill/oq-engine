@@ -270,7 +270,8 @@ class VulnerabilityFunction(object):
 
     @utils.memoized
     def loss_ratio_exceedance_matrix(self, steps):
-        """Compute the LREM (Loss Ratio Exceedance Matrix).
+        """
+        Compute the LREM (Loss Ratio Exceedance Matrix).
 
         :param int steps:
             Number of steps between loss ratios.
@@ -420,10 +421,12 @@ class VulnerabilityFunctionWithPMF(VulnerabilityFunction):
 
     @utils.memoized
     def loss_ratio_exceedance_matrix(self, steps):
-        """Compute the LREM (Loss Ratio Exceedance Matrix).
+        """
+        Compute the LREM (Loss Ratio Exceedance Matrix).
         Required for the Classical Risk and BCR Calculators.
         Currently left unimplemented as the PMF format is used only for the
-        Scenario and Event Based Risk Calculators
+        Scenario and Event Based Risk Calculators.
+
         :param int steps:
             Number of steps between loss ratios.
         """
@@ -1212,13 +1215,13 @@ def build_loss_curve_dt(curve_resolution, insured_losses=False):
     lc_list = []
     for lt in sorted(curve_resolution):
         C = curve_resolution[lt]
-        pairs = [('losses', (F32, C)), ('poes', (F32, C)), ('avg', F32)]
+        pairs = [('losses', (F32, C)), ('poes', (F32, C))]
         lc_dt = numpy.dtype(pairs)
         lc_list.append((str(lt), lc_dt))
     if insured_losses:
         for lt in sorted(curve_resolution):
             C = curve_resolution[lt]
-            pairs = [('losses', (F32, C)), ('poes', (F32, C)), ('avg', F32)]
+            pairs = [('losses', (F32, C)), ('poes', (F32, C))]
             lc_dt = numpy.dtype(pairs)
             lc_list.append((str(lt) + '_ins', lc_dt))
     loss_curve_dt = numpy.dtype(lc_list) if lc_list else None
@@ -1229,7 +1232,7 @@ def return_periods(eff_time, num_losses):
     """
     :param eff_time: ses_per_logic_tree_path * investigation_time
     :param num_losses: used to determine the minimum period
-    ;returns: an array of 32 bit periods
+    :returns: an array of 32 bit periods
 
     Here are a few examples:
 
@@ -1360,7 +1363,10 @@ class LossesByPeriodBuilder(object):
         A, P = len(asset_values), len(self.return_periods)
         array = numpy.zeros((A, P), self.loss_dt)
         for a, asset_value in enumerate(asset_values):
-            ratios = loss_ratios[a]  # shape (E, LI)
+            try:
+                ratios = loss_ratios[a]  # shape (E, LI)
+            except KeyError:  # no loss ratios > 0 for the given asset
+                continue
             for li, lt in enumerate(self.loss_dt.names):
                 aval = asset_value[lt.replace('_ins', '')]
                 array[a][lt] = aval * losses_by_period(

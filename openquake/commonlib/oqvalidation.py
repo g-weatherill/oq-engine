@@ -47,7 +47,7 @@ class OqParam(valid.ParamSet):
         valid.NoneOr(valid.positivefloat), None)
     asset_correlation = valid.Param(valid.NoneOr(valid.FloatRange(0, 1)), 0)
     asset_life_expectancy = valid.Param(valid.positivefloat)
-    avg_losses = valid.Param(valid.boolean, False)
+    avg_losses = valid.Param(valid.boolean, True)
     base_path = valid.Param(valid.utf8, '.')
     calculation_mode = valid.Param(valid.Choice(), '')  # -> get_oqparam
     coordinate_bin_width = valid.Param(valid.positivefloat)
@@ -83,7 +83,6 @@ class OqParam(valid.ParamSet):
         valid.intensity_measure_types_and_levels, None)
     interest_rate = valid.Param(valid.positivefloat)
     investigation_time = valid.Param(valid.positivefloat, None)
-    loss_curve_resolution = valid.Param(valid.positiveint, 50)
     lrem_steps_per_interval = valid.Param(valid.positiveint, 0)
     steps_per_interval = valid.Param(valid.positiveint, 1)
     master_seed = valid.Param(valid.positiveint, 0)
@@ -114,6 +113,7 @@ class OqParam(valid.ParamSet):
     region = valid.Param(valid.coordinates, None)
     region_constraint = valid.Param(valid.wkt_polygon, None)
     region_grid_spacing = valid.Param(valid.positivefloat, None)
+    optimize_same_id_sources = valid.Param(valid.boolean, False)
     risk_imtls = valid.Param(valid.intensity_measure_types_and_levels, {})
     risk_investigation_time = valid.Param(valid.positivefloat, None)
     rupture_mesh_spacing = valid.Param(valid.positivefloat)
@@ -164,7 +164,13 @@ class OqParam(valid.ParamSet):
                 'intensity_measure_types' in names_vals):
             logging.warn('Ignoring intensity_measure_types since '
                          'intensity_measure_types_and_levels is set')
-        if 'intensity_measure_types_and_levels' in names_vals:
+        if 'iml_disagg' in names_vals:
+            self.hazard_imtls = self.iml_disagg
+            if 'intensity_measure_types_and_levels' in names_vals:
+                raise ValueError(
+                    'Please remove the intensity_measure_types_and_levels: '
+                    'they will be inferred from the iml_disagg dictionary')
+        elif 'intensity_measure_types_and_levels' in names_vals:
             self.hazard_imtls = self.intensity_measure_types_and_levels
             delattr(self, 'intensity_measure_types_and_levels')
         elif 'intensity_measure_types' in names_vals:
@@ -195,6 +201,8 @@ class OqParam(valid.ParamSet):
         elif self.gsim is not None:
             self.check_gsims([self.gsim])
 
+        self.check_source_model()
+
         # checks for disaggregation
         if self.calculation_mode == 'disaggregation':
             if not self.poes_disagg and not self.iml_disagg:
@@ -204,6 +212,10 @@ class OqParam(valid.ParamSet):
                 logging.warn(
                     'iml_disagg=%s will not be computed from poes_disagg=%s',
                     str(self.iml_disagg), self.poes_disagg)
+            for k in ('mag_bin_width', 'distance_bin_width',
+                      'coordinate_bin_width', 'num_epsilon_bins'):
+                if k not in vars(self):
+                    raise ValueError('%s must be set in the job.ini file' % k)
 
         # checks for classical_damage
         if self.calculation_mode == 'classical_damage':
@@ -217,6 +229,11 @@ class OqParam(valid.ParamSet):
                 and self.asset_correlation not in (0, 1)):
             raise ValueError('asset_correlation != {0, 1} is no longer'
                              ' supported')
+
+        # check for GMFs from file
+        if (self.inputs.get('gmfs', '').endswith('.csv') and not self.sites and
+                'sites' not in self.inputs):
+            raise ValueError('You forgot sites|sites_csv in the job .ini file!')
 
         # checks for ucerf
         if 'ucerf' in self.calculation_mode:
@@ -321,6 +338,12 @@ class OqParam(valid.ParamSet):
 
         if self.uniform_hazard_spectra:
             self.check_uniform_hazard_spectra()
+
+    def imt_dt(self):
+        """
+        :returns: a numpy dtype {imt: float}
+        """
+        return numpy.dtype([(imt, float) for imt in self.imtls])
 
     @property
     def lti(self):
@@ -598,3 +621,12 @@ class OqParam(valid.ParamSet):
         elif len(ok_imts) == 1:
             raise ValueError(
                 'There is a single IMT, uniform_hazard_spectra cannot be True')
+
+    def check_source_model(self):
+        if ('hazard_curves' in self.inputs or 'gmfs' in self.inputs or
+                'rupture_model' in self.inputs):
+            return
+        if 'source' not in self.inputs and not self.hazard_calculation_id:
+            raise ValueError('Missing source_model_logic_tree in %s '
+                             'or missing --hc option' %
+                             self.inputs.get('job_ini', 'job_ini'))

@@ -147,7 +147,9 @@ class UcerfPSHACalculator(classical.PSHACalculator):
         logging.warn('%s is still experimental', self.__class__.__name__)
         self.sitecol = readinput.get_site_collection(self.oqparam)
         self.csm = get_composite_source_model(self.oqparam)
-        self.gsims_by_grp = self.csm.info.get_gsims_by_grp()
+        self.gsims_by_grp = {grp.id: self.csm.info.get_gsims(grp.id)
+                             for sm in self.csm.source_models
+                             for grp in sm.src_groups}
         self.rup_data = {}
 
     def execute(self):
@@ -165,7 +167,7 @@ class UcerfPSHACalculator(classical.PSHACalculator):
         acc.calc_times = []
         acc.eff_ruptures = AccumDict()  # grp_id -> eff_ruptures
         acc.bb_dict = {}  # just for API compatibility
-
+        param = dict(imtls=oq.imtls, truncation_level=oq.truncation_level)
         for sm in self.csm.source_models:  # one branch at the time
             grp_id = sm.ordinal
             gsims = self.gsims_by_grp[grp_id]
@@ -184,8 +186,7 @@ class UcerfPSHACalculator(classical.PSHACalculator):
             ct2 = (self.oqparam.concurrent_tasks // 2) or 1
 
             # parallelize on the background sources, small tasks
-            args = (bckgnd_sources, self.src_filter, oq.imtls,
-                    gsims, self.oqparam.truncation_level, (), monitor)
+            args = (bckgnd_sources, self.src_filter, gsims, param, monitor)
             bg_res = parallel.Starmap.apply(
                 pmap_from_grp, args, name='background_sources_%d' % grp_id,
                 concurrent_tasks=ct2).submit_all()

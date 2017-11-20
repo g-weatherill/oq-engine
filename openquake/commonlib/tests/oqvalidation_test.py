@@ -38,10 +38,15 @@ GST = {'gsim_logic_tree': writetmp('''\
             </logicTreeBranchSet>
         </logicTreeBranchingLevel>
     </logicTree>
-</nrml>''')}
+</nrml>'''),
+       'source': 'fake'}
 
+# hard-coded to avoid a dependency from openquake.calculators
 OqParam.calculation_mode.validator.choices = (
-    'classical', 'disaggregation', 'scenario', 'event_based', 'classical_risk')
+    'classical', 'disaggregation', 'scenario', 'scenario_damage',
+    'event_based', 'classical_risk')
+
+fakeinputs = {"source": "fake"}
 
 
 class OqParamTestCase(unittest.TestCase):
@@ -203,7 +208,7 @@ class OqParamTestCase(unittest.TestCase):
     def test_invalid_imt(self):
         with self.assertRaises(ValueError) as ctx:
             OqParam(
-                calculation_mode='event_based', inputs={},
+                calculation_mode='event_based', inputs=fakeinputs,
                 sites='0.1 0.2',
                 maximum_distance='400',
                 ground_motion_correlation_model='JB2009',
@@ -234,7 +239,7 @@ class OqParamTestCase(unittest.TestCase):
     def test_missing_levels_hazard(self):
         with self.assertRaises(ValueError) as ctx:
             OqParam(
-                calculation_mode='classical', inputs={},
+                calculation_mode='classical', inputs=fakeinputs,
                 sites='0.1 0.2',
                 maximum_distance='400',
                 intensity_measure_types='PGA',
@@ -245,7 +250,7 @@ class OqParamTestCase(unittest.TestCase):
     def test_missing_levels_event_based(self):
         with self.assertRaises(ValueError) as ctx:
             OqParam(
-                calculation_mode='event_based', inputs={},
+                calculation_mode='event_based', inputs=fakeinputs,
                 sites='0.1 0.2',
                 maximum_distance='400',
                 intensity_measure_types='PGA',
@@ -257,8 +262,7 @@ class OqParamTestCase(unittest.TestCase):
     def test_ambiguous_gsim(self):
         with self.assertRaises(ValueError) as ctx:
             OqParam(
-                calculation_mode='scenario', inputs={
-                    'gsim_logic_tree': 'something'},
+                calculation_mode='scenario', inputs=GST,
                 gsim='AbrahamsonEtAl2014',
                 sites='0.1 0.2',
                 maximum_distance='400',
@@ -302,6 +306,7 @@ class OqParamTestCase(unittest.TestCase):
                 maximum_distance='400',
                 intensity_measure_types_and_levels="{'PGV': [0.1, 0.2, 0.3]}",
                 uniform_hazard_spectra='1',
+                inputs=fakeinputs,
             ).set_risk_imtls({})
         self.assertIn("The `uniform_hazard_spectra` can be True only if "
                       "the IMT set contains SA(...) or PGA",
@@ -317,6 +322,7 @@ class OqParamTestCase(unittest.TestCase):
                 maximum_distance='400',
                 intensity_measure_types_and_levels="{'PGA': [0.1, 0.2, 0.3]}",
                 uniform_hazard_spectra='1',
+                inputs=fakeinputs,
             ).set_risk_imtls({})
         self.assertIn("There is a single IMT, uniform_hazard_spectra cannot "
                       "be True", str(ctx.exception))
@@ -331,10 +337,22 @@ class OqParamTestCase(unittest.TestCase):
             oq.set_risk_imtls(rm)
         self.assertIn("Unknown IMT: ' SA(0.1)'", str(ctx.exception))
 
+    def test_gmfs_but_no_sites(self):
+        inputs = fakeinputs.copy()
+        inputs['gmfs'] = 'fake.csv'
+        with self.assertRaises(ValueError) as ctx:
+            OqParam(
+                calculation_mode='scenario_damage',
+                inputs=inputs,
+                maximum_distance='400')
+        self.assertIn('You forgot sites|sites_csv in the job .ini file!',
+                      str(ctx.exception))
+
     def test_disaggregation(self):
         with self.assertRaises(ValueError) as ctx:
             OqParam(
                 calculation_mode='disaggregation',
+                inputs=fakeinputs,
                 gsim='BooreAtkinson2008',
                 reference_vs30_value='200',
                 sites='0.1 0.2',
