@@ -361,10 +361,17 @@ class AbrahamsonEtAl2014(GMPE):
         phi_al = self._get_phi_al_regional(C, mag, vs30measured, rrup)
         derAmp = self._get_derivative(C, sa1180, vs30)
         phi_amp = 0.4
-        if any(phi_al**2 < phi_amp**2):
-            print('phi_al:' % (phi_al))
-            print('magnitude: %.2f' % (mag))
-            raise ValueError('sqrt argument < 0')
+        idx = phi_al < phi_amp
+        if any(idx):
+            phi_amp = 0.4 * np.ones_like(phi_al)
+            phi_amp[idx] = 0.99 * phi_al[idx]
+            #print(mag, vs30measured, rrup)
+            #print('phi_al: %s' % str(phi_al))
+            #print('magnitude: %.2f' % (mag))
+            #phi_al = np.max(np.column_stack([phi_al,
+            #                                 phi_amp * np.ones_like(phi_al)]),
+            #                axis=1)
+            #raise ValueError('sqrt argument < 0')
         phi_b = np.sqrt(phi_al**2 - phi_amp**2)
         phi = np.sqrt(phi_b**2 * (1 + derAmp)**2 + phi_amp**2)
         return phi
@@ -394,7 +401,7 @@ class AbrahamsonEtAl2014(GMPE):
         if mag < 4:
             phi_al *= s1
         elif mag <= 6:
-            phi_al *= s1 + (s2 - s1) / 2. * (mag - 4.)
+            phi_al *= (s1 + ((s2 - s1) / 2.) * (mag - 4.))
         else:
             phi_al *= s2
         return phi_al
