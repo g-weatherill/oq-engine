@@ -117,12 +117,12 @@ class SkarlatoudisEtAl2013SSlab(GMPE):
             idx = np.logical_and(rhypo > 205.0, rhypo <= 355.0)
             fhr[idx] = (205.0 - rhypo[idx]) / 150.0
             idx = rhypo > 355.0
-            fhr[idx] = 1.0
+            fhr[idx] = -1.0
         else:
             idx = np.logical_and(rhypo > 140.0, rhypo <= 240.0)
             fhr[idx] = (140.0 - rhypo[idx]) / 100.0
             idx = rhypo > 240.0
-            fhr[idx] = 1.0
+            fhr[idx] = -1.0
         return fhr
             
 
