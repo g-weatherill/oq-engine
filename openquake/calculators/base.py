@@ -25,6 +25,7 @@ import operator
 import itertools
 import traceback
 import collections
+from functools import partial
 from datetime import datetime
 import numpy
 
@@ -413,11 +414,9 @@ class HazardCalculator(BaseCalculator):
             logging.info('Prefiltering the CompositeSourceModel')
             with self.monitor('prefiltering source model',
                               autoflush=True, measuremem=True):
-                self.src_filter = SourceFilter(
-                    self.sitecol, oq.maximum_distance)
-                self.csm = csm.filter(self.src_filter)
-            csm.info.gsim_lt.check_imts(oq.imtls)
-            self.datastore['csm_info'] = self.csm.info
+                src_filter = SourceFilter(self.sitecol, oq.maximum_distance)
+                self.csm = csm.filter(src_filter)
+            self.csm.info.gsim_lt.check_imts(oq.imtls)
             self.rup_data = {}
         self.init()
 
@@ -469,6 +468,8 @@ class HazardCalculator(BaseCalculator):
             self.rlzs_assoc = self.precalc.rlzs_assoc
         elif 'csm_info' in self.datastore:
             self.rlzs_assoc = self.datastore['csm_info'].get_rlzs_assoc()
+        elif hasattr(self, 'csm'):
+            self.rlzs_assoc = self.csm.info.get_rlzs_assoc()
         else:  # build a fake; used by risk-from-file calculators
             self.datastore['csm_info'] = fake = source.CompositionInfo.fake()
             self.rlzs_assoc = fake.get_rlzs_assoc()
@@ -594,6 +595,43 @@ class HazardCalculator(BaseCalculator):
                     raise ValueError(
                         'Missing consequenceFunctions for %s' %
                         ' '.join(missing))
+
+    def count_eff_ruptures(self, result_dict, src_group_id):
+        """
+        Returns the number of ruptures in the src_group (after filtering)
+        or 0 if the src_group has been filtered away.
+
+        :param result_dict: a dictionary with keys (grp_id, gsim)
+        :param src_group_id: the source group ID
+        """
+        return result_dict.eff_ruptures.get(src_group_id, 0)
+
+    def store_source_info(self, infos, acc):
+        # save the calculation times per each source
+        if infos:
+            rows = sorted(
+                infos.values(),
+                key=operator.attrgetter('calc_time'),
+                reverse=True)
+            array = numpy.zeros(len(rows), source.SourceInfo.dt)
+            for i, row in enumerate(rows):
+                for name in array.dtype.names:
+                    value = getattr(row, name)
+                    if name == 'grp_id' and isinstance(value, list):
+                        # same ID sources; store only the first
+                        value = value[0]
+                    array[i][name] = value
+            self.datastore['source_info'] = array
+            infos.clear()
+        self.rlzs_assoc = self.csm.info.get_rlzs_assoc(
+            partial(self.count_eff_ruptures, acc), self.oqparam.sm_lt_path)
+        self.datastore['csm_info'] = self.csm.info
+        if 'source_info' in self.datastore:
+            # the table is missing for UCERF, we should fix that
+            self.datastore.set_attrs(
+                'source_info', nbytes=array.nbytes,
+                has_dupl_sources=self.csm.has_dupl_sources)
+        self.datastore.flush()
 
     def post_process(self):
         """For compatibility with the engine"""

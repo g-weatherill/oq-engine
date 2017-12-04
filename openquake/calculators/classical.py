@@ -20,15 +20,11 @@ from __future__ import division
 import math
 import logging
 import operator
-from functools import partial
 import numpy
 
-from openquake.baselib import parallel, datastore
+from openquake.baselib import parallel
 from openquake.baselib.python3compat import encode
 from openquake.baselib.general import AccumDict
-from openquake.hazardlib.geo.utils import get_spherical_bounding_box
-from openquake.hazardlib.geo.utils import get_longitudinal_extent
-from openquake.hazardlib.geo.geodetic import npoints_between
 from openquake.hazardlib.calc.hazard_curve import (
     pmap_from_grp, pmap_from_trt, ProbabilityMap)
 from openquake.hazardlib.stats import compute_pmap_stats
@@ -44,22 +40,42 @@ weight = operator.attrgetter('weight')
 
 
 source_data_dt = numpy.dtype(
-    [('taskno', U16), ('nsites', U32), ('weight', F32)])
+    [('taskno', U16), ('nsites', U32), ('nruptures', U32), ('weight', F32)])
 
 
 def saving_sources_by_task(iterargs, dstore):
     """
-    Yield the iterargs again by populating 'task_info/source_ids'
+    Yield the iterargs again by populating 'task_info/source_data'
     """
     source_ids = []
     data = []
     for i, args in enumerate(iterargs, 1):
         source_ids.append(' ' .join(src.source_id for src in args[0]))
         for src in args[0]:  # collect source data
-            data.append((i, src.nsites, src.weight))
+            data.append((i, src.nsites, src.num_ruptures, src.weight))
         yield args
-    dstore['task_sources'] = numpy.array([encode(s) for s in source_ids])
+    dstore['task_sources'] = encode(source_ids)
     dstore.extend('task_info/source_data', numpy.array(data, source_data_dt))
+
+
+def classical(sources, src_filter, gsims, param, monitor):
+    """
+    :param sources:
+        a list of independent sources or a SourceGroup with mutex sources
+    :param src_filter:
+        a SourceFilter instance
+    :param gsims:
+        a list of GSIMs
+    :param param:
+        a dictionary with parameters imtls and truncation_level
+    :param monitor:
+        a Monitor instance
+    :returns: a dictionary grp_id -> ProbabilityMap
+    """
+    if getattr(sources, 'src_interdep', None) == 'mutex':
+        return pmap_from_grp(sources, src_filter, gsims, param, monitor)
+    else:
+        return pmap_from_trt(sources, src_filter, gsims, param, monitor)
 
 
 @base.calculators.add('psha')
@@ -67,43 +83,30 @@ class PSHACalculator(base.HazardCalculator):
     """
     Classical PSHA calculator
     """
-    core_task = pmap_from_grp
-    source_info = datastore.persistent_attribute('source_info')
+    core_task = classical
 
     def agg_dicts(self, acc, pmap):
         """
         Aggregate dictionaries of hazard curves by updating the accumulator.
 
         :param acc: accumulator dictionary
-        :param pmap: a pmap or a dictionary grp_id -> ProbabilityMap
+        :param pmap: dictionary grp_id -> ProbabilityMap
         """
         with self.monitor('aggregate curves', autoflush=True):
-            # TODO: think about how to store source information for the case
-            # of optimize_same_id_sources = True
-            if not self.oqparam.optimize_same_id_sources:
-                for src_id, nsites, srcweight, calc_time in pmap.calc_times:
-                    src_id = src_id.split(':', 1)[0]
-                    info = self.csm.infos[pmap.grp_id, src_id]
-                    info.calc_time += calc_time
-                    info.num_sites = max(info.num_sites, nsites)
-                    info.num_split += 1
             acc.eff_ruptures += pmap.eff_ruptures
-            if isinstance(pmap, ProbabilityMap):
-                acc[pmap.grp_id] |= pmap
-            else:  # dictionary of pmaps
-                for grp_id in pmap:
+            for grp_id in pmap:
+                if pmap[grp_id]:
                     acc[grp_id] |= pmap[grp_id]
+            for src_id, nsites, srcweight, calc_time in pmap.calc_times:
+                src_id = src_id.split(':', 1)[0]
+                try:
+                    info = self.csm.infos[grp_id, src_id]
+                except KeyError:
+                    continue
+                info.calc_time += calc_time
+                info.num_sites = max(info.num_sites, nsites)
+                info.num_split += 1
         return acc
-
-    def count_eff_ruptures(self, result_dict, src_group_id):
-        """
-        Returns the number of ruptures in the src_group (after filtering)
-        or 0 if the src_group has been filtered away.
-
-        :param result_dict: a dictionary with keys (grp_id, gsim)
-        :param src_group_id: the source group ID
-        """
-        return result_dict.eff_ruptures.get(src_group_id, 0)
 
     def zerodict(self):
         """
@@ -130,9 +133,8 @@ class PSHACalculator(base.HazardCalculator):
         except AttributeError:
             raise RuntimeError('No CompositeSourceModel, did you forget to '
                                'run the hazard or the --hc option?')
-        monitor = self.monitor(self.core_task.__name__)
         with self.monitor('managing sources', autoflush=True):
-            allargs = self.gen_args(self.csm, monitor)
+            allargs = self.gen_args(self.monitor('classical'))
             iterargs = saving_sources_by_task(allargs, self.datastore)
             if isinstance(allargs, list):
                 # there is a trick here: if the arguments are known
@@ -140,119 +142,59 @@ class PSHACalculator(base.HazardCalculator):
                 # then the Starmap will understand the case of a single
                 # argument tuple and it will run in core the task
                 iterargs = list(iterargs)
-            func = (pmap_from_trt if self.oqparam.optimize_same_id_sources
-                    else self.core_task.__func__)
-            ires = parallel.Starmap(func, iterargs).submit_all()
+            ires = parallel.Starmap(
+                self.core_task.__func__, iterargs).submit_all()
         acc = ires.reduce(self.agg_dicts, self.zerodict())
         with self.monitor('store source_info', autoflush=True):
             self.store_source_info(self.csm.infos, acc)
         return acc
 
-    def gen_args(self, csm, monitor):
+    def gen_args(self, monitor):
         """
         Used in the case of large source model logic trees.
 
-        :param csm: a CompositeSourceModel instance
         :param monitor: a :class:`openquake.baselib.performance.Monitor`
         :yields: (sources, sites, gsims, monitor) tuples
         """
         oq = self.oqparam
-        if self.is_stochastic:  # disable tiling
-            num_tiles = 1
-        else:
-            num_tiles = math.ceil(len(self.sitecol) / oq.sites_per_tile)
+        opt = self.oqparam.optimize_same_id_sources
+        num_tiles = math.ceil(len(self.sitecol) / oq.sites_per_tile)
         if num_tiles > 1:
             tiles = self.sitecol.split_in_tiles(num_tiles)
         else:
             tiles = [self.sitecol]
         maxweight = self.csm.get_maxweight(oq.concurrent_tasks)
-        if oq.optimize_same_id_sources:
-            self.dic = csm.get_sources_by_trt(True)  # redefine csm.weight
-        if oq.split_sources is False:
-            maxweight = numpy.inf  # do not split the sources
-        else:
-            numheavy = len(self.csm.get_sources('heavy', maxweight))
-            logging.info('Using maxweight=%d, numheavy=%d, numtiles=%d',
-                         maxweight, numheavy, len(tiles))
-        param = dict(
-            truncation_level=oq.truncation_level,
-            imtls=oq.imtls, seed=oq.ses_seed,
-            maximum_distance=oq.maximum_distance,
-            disagg=oq.poes_disagg or oq.iml_disagg,
-            ses_per_logic_tree_path=oq.ses_per_logic_tree_path)
-        for t, tile in enumerate(tiles):
-            if num_tiles > 1:
-                with self.monitor('prefiltering source model', autoflush=True):
-                    logging.info('Instantiating src_filter for tile %d', t + 1)
-                    src_filter = SourceFilter(tile, oq.maximum_distance)
-                    csm = self.csm.filter(src_filter)
-            else:
-                src_filter = self.src_filter
-            if oq.optimize_same_id_sources:
-                iterargs = self._args_by_trt(
-                    csm, src_filter, param, num_tiles, maxweight)
-            else:
-                iterargs = self._args_by_grp(
-                    csm, src_filter, param, num_tiles, maxweight)
+        numheavy = len(self.csm.get_sources('heavy', maxweight))
+        logging.info('Using maxweight=%d, numheavy=%d, tiles=%d',
+                     maxweight, numheavy, len(tiles))
+        param = dict(truncation_level=oq.truncation_level, imtls=oq.imtls)
+        for tile_i, tile in enumerate(tiles, 1):
             num_tasks = 0
             num_sources = 0
-            for args in iterargs:
-                num_tasks += 1
-                num_sources += len(args[0])
-                yield args + (monitor,)
+            with self.monitor('prefiltering'):
+                logging.info('Prefiltering tile %d of %d', tile_i, len(tiles))
+                src_filter = SourceFilter(tile, oq.maximum_distance)
+                csm = self.csm.filter(src_filter)
+            if csm.has_dupl_sources and not opt:
+                logging.warn('Found %d duplicated sources, use oq info',
+                             csm.has_dupl_sources)
+            for sg in csm.src_groups:
+                if sg.src_interdep == 'mutex':
+                    gsims = self.csm.info.gsim_lt.get_gsims(sg.trt)
+                    self.csm.add_infos(sg.sources)  # update self.csm.infos
+                    yield sg, src_filter, gsims, param, monitor
+                    num_tasks += 1
+                    num_sources += len(sg.sources)
+            # NB: csm.get_sources_by_trt discards the mutex sources
+            for trt, sources in self.csm.get_sources_by_trt(opt).items():
+                gsims = self.csm.info.gsim_lt.get_gsims(trt)
+                self.csm.add_infos(sources)  # update with unsplit sources
+                for block in csm.split_in_blocks(maxweight, sources):
+                    yield block, src_filter, gsims, param, monitor
+                    num_tasks += 1
+                    num_sources += len(block)
             logging.info('Sent %d sources in %d tasks', num_sources, num_tasks)
         source.split_map.clear()
-
-    def _args_by_grp(self, csm, src_filter, param, num_tiles, maxweight):
-        ngroups = sum(len(sm.src_groups) for sm in csm.source_models)
-        for sm in csm.source_models:
-            for sg in sm.src_groups:
-                gsims = self.csm.info.gsim_lt.get_gsims(sg.trt)
-                if num_tiles <= 1:
-                    logging.info(
-                        'Sending source group #%d of %d (%s, %d sources)',
-                        sg.id + 1, ngroups, sg.trt, len(sg.sources))
-                self.csm.add_infos(sg.sources)
-                if sg.src_interdep == 'mutex':  # do not split the group
-                    sg.samples = sm.samples
-                    yield sg, src_filter, gsims, param
-                else:
-                    for block in self.csm.split_sources(
-                            sg.sources, src_filter, maxweight):
-                        block.samples = sm.samples
-                        yield block, src_filter, gsims, param
-
-    def _args_by_trt(self, csm, src_filter, param, num_tiles, maxweight):
-        for trt, sources in self.dic.items():
-            gsims = self.csm.info.gsim_lt.get_gsims(trt)
-            for block in self.csm.split_sources(
-                    sources, src_filter, maxweight):
-                block.samples = sources[0].samples
-                param['sm_id'] = sources[0].sm_id
-                yield block, src_filter, gsims, param
-
-    def store_source_info(self, infos, acc):
-        # save the calculation times per each source
-        if infos:
-            rows = sorted(
-                infos.values(),
-                key=operator.attrgetter('calc_time'),
-                reverse=True)
-            array = numpy.zeros(len(rows), source.SourceInfo.dt)
-            for i, row in enumerate(rows):
-                for name in array.dtype.names:
-                    array[i][name] = getattr(row, name)
-            self.source_info = array
-            infos.clear()
-        self.rlzs_assoc = self.csm.info.get_rlzs_assoc(
-            partial(self.count_eff_ruptures, acc), self.oqparam.sm_lt_path)
-        self.datastore['csm_info'] = self.csm.info
-        if 'source_info' in self.datastore:
-            # the table is missing for UCERF, we should fix that
-            self.datastore.set_attrs(
-                'source_info', nbytes=array.nbytes,
-                has_dupl_sources=self.csm.has_dupl_sources)
-        self.datastore.flush()
 
     def post_execute(self, pmap_by_grp_id):
         """

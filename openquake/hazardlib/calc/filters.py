@@ -191,11 +191,11 @@ class Piecewise(object):
     def __init__(self, x, y):
         self.y = numpy.array(y)
         # interpolating from x values to indices in the range [0: len(x)]
-        self.interp = interp1d(x, range(len(x)), bounds_error=False,
-                               fill_value=(0, len(x) - 1))
+        self.piecewise = interp1d(x, range(len(x)), bounds_error=False,
+                                  fill_value=(0, len(x) - 1))
 
     def __call__(self, x):
-        idx = numpy.int64(numpy.ceil(self.interp(x)))
+        idx = numpy.int64(numpy.ceil(self.piecewise(x)))
         return self.y[idx]
 
 
@@ -240,19 +240,19 @@ class IntegrationDistance(collections.Mapping):
             return value
         elif mag is None:  # get the maximum distance
             return MAX_DISTANCE
-        elif not hasattr(self, 'interp'):
-            self.interp = {}  # function cache
+        elif not hasattr(self, 'piecewise'):
+            self.piecewise = {}  # function cache
         try:
-            md = self.interp[trt]  # retrieve from the cache
+            md = self.piecewise[trt]  # retrieve from the cache
         except KeyError:  # fill the cache
             mags, dists = zip(*getdefault(self.magdist, trt))
             if mags[-1] < 11:  # use 2000 km for mag > mags[-1]
                 mags = numpy.concatenate([mags, [11]])
                 dists = numpy.concatenate([dists, [MAX_DISTANCE]])
-            md = self.interp[trt] = Piecewise(mags, dists)
+            md = self.piecewise[trt] = Piecewise(mags, dists)
         return md(mag)
 
-    def get_closest(self, sites, rupture, distance_type='rrup'):
+    def get_closest(self, sites, rupture, distance_type='rrup', filter=True):
         """
         :param sites: a (Filtered)SiteColletion
         :param rupture: a rupture
@@ -261,7 +261,7 @@ class IntegrationDistance(collections.Mapping):
         :raises: a FarAwayRupture exception if the rupture is far away
         """
         distances = get_distances(rupture, sites.mesh, distance_type)
-        if not self.dic:  # for sites already filtered
+        if not filter or not self.dic:  # for sites already filtered
             return sites, distances
         mask = distances <= self(rupture.tectonic_region_type, rupture.mag)
         if mask.any():
@@ -289,7 +289,7 @@ class IntegrationDistance(collections.Mapping):
         return lon - a2, lat - a1, lon + a2, lat + a1
 
     def __getstate__(self):
-        # otherwise is not pickleable due to .interp
+        # otherwise is not pickleable due to .piecewise
         return dict(dic=self.dic, magdist=self.magdist)
 
     def __getitem__(self, trt):
@@ -393,12 +393,12 @@ class SourceFilter(object):
     def __call__(self, sources, sites=None):
         if sites is None:
             sites = self.sitecol
-        if self.sitecol is None:  # do not filter
-            for source in sources:
-                yield source, sites
-            return
         for src in sources:
-            if not self.integration_distance:  # do not filter
+            if hasattr(src, 'sites'):  # already filtered
+                yield src, src.sites
+            elif not self.integration_distance:  # do not filter
+                if sites is not None:
+                    src.nsites = len(sites)
                 yield src, sites
             elif self.use_rtree:  # Rtree filtering, used in the controller
                 box = self.get_affected_box(src)

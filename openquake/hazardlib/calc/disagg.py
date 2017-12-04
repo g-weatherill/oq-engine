@@ -24,100 +24,84 @@ extracting a specific PMF from the result of :func:`disaggregation`.
 from __future__ import division
 import sys
 import warnings
+import operator
 import collections
 import numpy
 import scipy.stats
 
 from openquake.baselib.python3compat import raise_, range
 from openquake.baselib.performance import Monitor
+from openquake.baselib.hdf5 import ArrayWrapper
+from openquake.baselib.general import AccumDict, pack, groupby
 from openquake.hazardlib.calc import filters
 from openquake.hazardlib.imt import from_string
 from openquake.hazardlib.geo.geodetic import npoints_between
 from openquake.hazardlib.geo.utils import get_longitudinal_extent
-from openquake.hazardlib.geo.utils import get_spherical_bounding_box, cross_idl
+from openquake.hazardlib.geo.utils import cross_idl
 from openquake.hazardlib.site import SiteCollection
 from openquake.hazardlib.gsim.base import ContextMaker
 
-# a 6-uple containing float 4 arrays mags, dists, lons, lats,
-# 1 int array trts and a list of dictionaries pnes
-BinData = collections.namedtuple('BinData', 'mags dists lons lats eps trts')
+
+def _imls(curves, poe, imt, imls, rlzi):
+    if poe is None:  # iml_disagg was set
+        return imls
+    # else return interpolated intensity measure levels
+    levels = [numpy.interp(poe, curve[rlzi][imt][::-1], imls[::-1])
+              if curve else numpy.nan for curve in curves]
+    return numpy.array(levels)  # length N
 
 
-def make_imldict(rlzs_by_gsim, imtls, iml_disagg, poes_disagg=(None,),
-                 curves=None):
+def make_iml4(R, imtls, iml_disagg, poes_disagg=(None,), curves=()):
     """
-    :returns: a dictionary poe, gsim, imt, rlzi -> iml
-
-    If iml_disagg is given, poe is None and the values are all the same for a
-    given imt for any gsim and rlzi.
+    :returns: an ArrayWrapper over a 4D array of shape (N, R, M, P)
     """
-    if iml_disagg:
-        poes_disagg = [None]
-        iml_disagg = {from_string(imt): iml_disagg[imt]
-                      for imt, iml in iml_disagg.items()}
-    elif not curves:  # there could be no hazard for the given site
-        return {}
-    imldict = {}
-    for poe in poes_disagg:
-        for gsim in rlzs_by_gsim:
-            for imt_str, imls in imtls.items():
-                imt = from_string(imt_str)
-                for rlzi in rlzs_by_gsim[gsim]:
-                    imldict[poe, gsim, imt, rlzi] = numpy.interp(
-                        poe, curves[rlzi][imt_str][::-1], imls[::-1]
-                    ) if poe is not None else imls[0]
-    return imldict
+    N = len(curves) or 1
+    M = len(imtls)
+    P = len(poes_disagg)
+    arr = numpy.zeros((N, R, M, P))
+    imts = [from_string(imt) for imt in imtls]
+    for m, imt in enumerate(imtls):
+        imls = imtls[imt]
+        for p, poe in enumerate(poes_disagg):
+            for r in range(R):
+                arr[:, r, m, p] = _imls(curves, poe, imt, imls, r)
+    return ArrayWrapper(arr, dict(poes_disagg=poes_disagg, imts=imts))
 
 
-def _collect_bins_data(trt_num, sources, site, cmaker, imldict,
-                       truncation_level, n_epsilons, mon=Monitor()):
-    # returns a BinData instance
-    sitecol = SiteCollection([site])
-    mags = []
-    dists = []
-    lons = []
-    lats = []
-    trts = []
-    pnes = collections.defaultdict(list)  # poe, imt, iml, rlzi -> pnes
-    sitemesh = sitecol.mesh
+def collect_bin_data(sources, sitecol, cmaker, iml4,
+                     truncation_level, n_epsilons, monitor=Monitor()):
+    """
+    :param sources: a list of sources
+    :param sitecol: a SiteCollection instance
+    :param cmaker: a ContextMaker instance
+    :param iml4: an ArrayWrapper of intensities of shape (N, R, M, P)
+    :param truncation_level: the truncation level
+    :param n_epsilons: the number of epsilons
+    :param monitor: a Monitor instance
+    :returns: a dictionary (poe, imt, rlzi) -> probabilities of shape (N, E)
+    """
     # NB: instantiating truncnorm is slow and calls the infamous "doccer"
     truncnorm = scipy.stats.truncnorm(-truncation_level, truncation_level)
+    epsilons = numpy.linspace(truncnorm.a, truncnorm.b, n_epsilons + 1)
+    acc = AccumDict(accum=[])
     for source in sources:
-        tect_reg = trt_num[source.tectonic_region_type]
+        ruptures = source.iter_ruptures()
         try:
-            for rupture, site_dist, pnedict in cmaker.disaggregate(
-                    sitecol, source.iter_ruptures(), imldict,
-                    truncnorm, n_epsilons, mon):
-
-                # extract rupture parameters of interest
-                mags.append(rupture.mag)
-                dists.append(site_dist)
-                [closest_point] = rupture.surface.get_closest_points(sitemesh)
-                lons.append(closest_point.longitude)
-                lats.append(closest_point.latitude)
-                trts.append(tect_reg)
-                for k, v in pnedict.items():
-                    pnes[k].append(v)
-
+            acc += cmaker.disaggregate(
+                sitecol, ruptures, iml4, truncnorm, epsilons, monitor)
         except Exception as err:
             etype, err, tb = sys.exc_info()
             msg = 'An error occurred with source id=%s. Error: %s'
             msg %= (source.source_id, err)
             raise_(etype, msg, tb)
-
-    return BinData(numpy.array(mags, float),
-                   numpy.array(dists, float),
-                   numpy.array(lons, float),
-                   numpy.array(lats, float),
-                   {k: numpy.array(pnes[k]) for k in pnes},
-                   numpy.array(trts, int))
+    return pack(acc, 'mags dists lons lats'.split())
 
 
 def lon_lat_bins(bb, coord_bin_width):
     """
     Define bin edges for disaggregation histograms.
 
-    Given bins data as provided by :func:`_collect_bins_data`, this function
+    Given bins data as provided by :func:`collect_bin_data`, this function
     finds edges of histograms, taking into account maximum and minimum values
     of magnitude, distance and coordinates as well as requested sizes/numbers
     of bins.
@@ -135,46 +119,72 @@ def lon_lat_bins(bb, coord_bin_width):
     return lon_bins, lat_bins
 
 
-def _arrange_data_in_bins(bins_data, bin_edges):
+# this is fast
+def build_disagg_matrix(bdata, bin_edges, sid, mon=Monitor):
     """
-    Given bins data, as it comes from :func:`_collect_bins_data`, and bin edges
-    from :func:`_define_bins`, create a normalized 6d disaggregation matrix.
+    :param bdata: a dictionary of probabilities of no exceedence
+    :param bin_edges: bin edges for each site
+    :param sid: site index
+    :param mon: a Monitor instance
+    :returns: a dictionary key -> matrix|pmf for each key in bdata
     """
-    mags, dists, lons, lats, pnes, trts = bins_data
-    mag_bins, dist_bins, lon_bins, lat_bins, eps_bins, trt_bins = bin_edges
+    with mon('build_disagg_matrix'):
+        mag_bins, dist_bins, lon_bins, lat_bins, eps_bins = bin_edges[sid]
 
-    dim1 = len(mag_bins) - 1
-    dim2 = len(dist_bins) - 1
-    dim3 = len(lon_bins) - 1
-    dim4 = len(lat_bins) - 1
-    shape = (dim1, dim2, dim3, dim4, len(eps_bins) - 1, len(trt_bins))
-    diss_matrix = numpy.ones(shape)
+        dim1 = len(mag_bins) - 1
+        dim2 = len(dist_bins) - 1
+        dim3 = len(lon_bins) - 1
+        dim4 = len(lat_bins) - 1
+        shape = (dim1, dim2, dim3, dim4, len(eps_bins) - 1)
 
-    # find bin indexes of rupture attributes; bins are assumed closed
-    # on the lower bound, and open on the upper bound, that is [ )
-    # longitude values need an ad-hoc method to take into account
-    # the 'international date line' issue
-    # the 'minus 1' is needed because the digitize method returns the index
-    # of the upper bound of the bin
-    mags_idx = numpy.digitize(mags, mag_bins) - 1
-    dists_idx = numpy.digitize(dists, dist_bins) - 1
-    lons_idx = _digitize_lons(lons, lon_bins)
-    lats_idx = numpy.digitize(lats, lat_bins) - 1
+        # find bin indexes of rupture attributes; bins are assumed closed
+        # on the lower bound, and open on the upper bound, that is [ )
+        # longitude values need an ad-hoc method to take into account
+        # the 'international date line' issue
+        # the 'minus 1' is needed because the digitize method returns the
+        # index of the upper bound of the bin
+        mags_idx = numpy.digitize(bdata.mags, mag_bins) - 1
+        dists_idx = numpy.digitize(bdata.dists[:, sid], dist_bins) - 1
+        lons_idx = _digitize_lons(bdata.lons[:, sid], lon_bins)
+        lats_idx = numpy.digitize(bdata.lats[:, sid], lat_bins) - 1
 
-    # because of the way numpy.digitize works, values equal to the last bin
-    # edge are associated to an index equal to len(bins) which is not a valid
-    # index for the disaggregation matrix. Such values are assumed to fall
-    # in the last bin.
-    mags_idx[mags_idx == dim1] = dim1 - 1
-    dists_idx[dists_idx == dim2] = dim2 - 1
-    lons_idx[lons_idx == dim3] = dim3 - 1
-    lats_idx[lats_idx == dim4] = dim4 - 1
+        # because of the way numpy.digitize works, values equal to the last bin
+        # edge are associated to an index equal to len(bins) which is not a
+        # valid index for the disaggregation matrix. Such values are assumed
+        # to fall in the last bin
+        mags_idx[mags_idx == dim1] = dim1 - 1
+        dists_idx[dists_idx == dim2] = dim2 - 1
+        lons_idx[lons_idx == dim3] = dim3 - 1
+        lats_idx[lats_idx == dim4] = dim4 - 1
 
-    for i, (i_mag, i_dist, i_lon, i_lat, i_trt) in enumerate(
-            zip(mags_idx, dists_idx, lons_idx, lats_idx, trts)):
-        diss_matrix[i_mag, i_dist, i_lon, i_lat, :, i_trt] *= pnes[i, :]
+        out = {}
+        cache = {}
+        cache_hit = 0
+        num_zeros = 0
+        for k, allpnes in bdata.items():
+            pnes = allpnes[:, sid, :]  # shape (U, N, E)
+            cache_key = pnes.sum()
+            if cache_key == pnes.size:  # all pnes are 1
+                num_zeros += 1
+                continue  # zero matrices are not transferred
+            try:
+                matrix = cache[cache_key]
+                cache_hit += 1
+            except KeyError:
+                mat = numpy.ones(shape)
+                for i_mag, i_dist, i_lon, i_lat, pne in zip(
+                        mags_idx, dists_idx, lons_idx, lats_idx, pnes):
+                    mat[i_mag, i_dist, i_lon, i_lat] *= pne
+                matrix = 1. - mat
+                cache[cache_key] = matrix
+            out[k] = matrix
 
-    return 1 - diss_matrix
+        # operations, hits, num_zeros
+        if hasattr(mon, 'cache_info'):
+            mon.cache_info += numpy.array([len(bdata), cache_hit, num_zeros])
+        else:
+            mon.cache_info = numpy.array([len(bdata), cache_hit, num_zeros])
+    return out
 
 
 def _digitize_lons(lons, lon_bins):
@@ -275,37 +285,48 @@ def disaggregation(
     trt_num = dict((trt, i) for i, trt in enumerate(trts))
     rlzs_by_gsim = {gsim_by_trt[trt]: [0] for trt in trts}
     cmaker = ContextMaker(rlzs_by_gsim, source_filter.integration_distance)
-    imldict = make_imldict(rlzs_by_gsim, {str(imt): [iml]}, {str(imt): iml})
-    bd = _collect_bins_data(
-        trt_num, sources, site, cmaker, imldict, truncation_level, n_epsilons)
-    if all(len(x) == 0 for x in bd):
-        # No ruptures have contributed to the hazard level at this site.
+    iml4 = make_iml4(1, {str(imt): [iml]}, {str(imt): iml})
+    by_trt = groupby(sources, operator.attrgetter('tectonic_region_type'))
+    bdata = {}
+    sitecol = SiteCollection([site])
+    for trt, srcs in by_trt.items():
+        bdata[trt] = collect_bin_data(
+            srcs, sitecol, cmaker, iml4, truncation_level, n_epsilons)
+    if sum(len(bd.mags) for bd in bdata.values()) == 0:
         warnings.warn(
             'No ruptures have contributed to the hazard at site %s'
             % site, RuntimeWarning)
         return None, None
-    [pnes] = bd.eps.values()
-    bins = [bd.mags, bd.dists, bd.lons, bd.lats, pnes, bd.trts]
 
+    min_mag = min(bd.mags.min() for bd in bdata.values())
+    max_mag = max(bd.mags.max() for bd in bdata.values())
     mag_bins = mag_bin_width * numpy.arange(
-        int(numpy.floor(bd.mags.min() / mag_bin_width)),
-        int(numpy.ceil(bd.mags.max() / mag_bin_width) + 1))
+        int(numpy.floor(min_mag / mag_bin_width)),
+        int(numpy.ceil(max_mag / mag_bin_width) + 1))
 
+    min_dist = min(bd.dists.min() for bd in bdata.values())
+    max_dist = max(bd.dists.max() for bd in bdata.values())
     dist_bins = dist_bin_width * numpy.arange(
-        int(numpy.floor(bd.dists.min() / dist_bin_width)),
-        int(numpy.ceil(bd.dists.max() / dist_bin_width) + 1))
+        int(numpy.floor(min_dist / dist_bin_width)),
+        int(numpy.ceil(max_dist / dist_bin_width) + 1))
 
-    bb = (bd.lons.min(), bd.lons.min(), bd.lats.max(), bd.lats.max())
+    bb = (min(bd.lons.min() for bd in bdata.values()),
+          min(bd.lats.min() for bd in bdata.values()),
+          max(bd.lons.max() for bd in bdata.values()),
+          max(bd.lats.max() for bd in bdata.values()))
     lon_bins, lat_bins = lon_lat_bins(bb, coord_bin_width)
 
     eps_bins = numpy.linspace(-truncation_level, truncation_level,
                               n_epsilons + 1)
 
-    bin_edges = (mag_bins, dist_bins, lon_bins, lat_bins, eps_bins,
-                 sorted(trt_num))
-    # mag_edges, dist_edges, lon_edges, lat_edges, eps_edges, trt_edges
-    diss_matrix = _arrange_data_in_bins(bins, bin_edges)
-    return bin_edges, diss_matrix
+    bin_edges = (mag_bins, dist_bins, lon_bins, lat_bins, eps_bins)
+    matrix = numpy.zeros((len(mag_bins) - 1, len(dist_bins) - 1,
+                          len(lon_bins) - 1, len(lat_bins) - 1,
+                          len(eps_bins) - 1, len(trts)))
+    for trt in bdata:
+        [mat] = build_disagg_matrix(bdata[trt], [bin_edges], sid=0).values()
+        matrix[..., trt_num[trt]] = mat
+    return bin_edges + (trts,), matrix
 
 
 def mag_pmf(matrix):
@@ -315,17 +336,16 @@ def mag_pmf(matrix):
     :returns:
         1d array, a histogram representing magnitude PMF.
     """
-    nmags, ndists, nlons, nlats, neps, ntrts = matrix.shape
+    nmags, ndists, nlons, nlats, neps = matrix.shape
     mag_pmf = numpy.zeros(nmags)
     for i in range(nmags):
         mag_pmf[i] = numpy.prod(
-            [1 - matrix[i][j][k][l][m][n]
+            [1. - matrix[i][j][k][l][m]
              for j in range(ndists)
              for k in range(nlons)
              for l in range(nlats)
-             for m in range(neps)
-             for n in range(ntrts)])
-    return 1 - mag_pmf
+             for m in range(neps)])
+    return 1. - mag_pmf
 
 
 def dist_pmf(matrix):
@@ -335,17 +355,16 @@ def dist_pmf(matrix):
     :returns:
         1d array, a histogram representing distance PMF.
     """
-    nmags, ndists, nlons, nlats, neps, ntrts = matrix.shape
+    nmags, ndists, nlons, nlats, neps = matrix.shape
     dist_pmf = numpy.zeros(ndists)
     for j in range(ndists):
         dist_pmf[j] = numpy.prod(
-            [1 - matrix[i][j][k][l][m][n]
+            [1. - matrix[i][j][k][l][m]
              for i in range(nmags)
              for k in range(nlons)
              for l in range(nlats)
-             for m in range(neps)
-             for n in range(ntrts)])
-    return 1 - dist_pmf
+             for m in range(neps)])
+    return 1. - dist_pmf
 
 
 def trt_pmf(matrix):
@@ -353,19 +372,16 @@ def trt_pmf(matrix):
     Fold full disaggregation matrix to tectonic region type PMF.
 
     :returns:
-        1d array, a histogram representing tectonic region type PMF.
+        a scalar
     """
-    nmags, ndists, nlons, nlats, neps, ntrts = matrix.shape
-    trt_pmf = numpy.zeros(ntrts)
-    for n in range(ntrts):
-        trt_pmf[n] = numpy.prod(
-            [1 - matrix[i][j][k][l][m][n]
-             for i in range(nmags)
-             for j in range(ndists)
-             for k in range(nlons)
-             for l in range(nlats)
-             for m in range(neps)])
-    return 1 - trt_pmf
+    nmags, ndists, nlons, nlats, neps = matrix.shape
+    return 1. - numpy.prod(
+        [1. - matrix[i][j][k][l][m]
+         for i in range(nmags)
+         for j in range(ndists)
+         for k in range(nlons)
+         for l in range(nlats)
+         for m in range(neps)])
 
 
 def mag_dist_pmf(matrix):
@@ -376,17 +392,16 @@ def mag_dist_pmf(matrix):
         2d array. First dimension represents magnitude histogram bins,
         second one -- distance histogram bins.
     """
-    nmags, ndists, nlons, nlats, neps, ntrts = matrix.shape
+    nmags, ndists, nlons, nlats, neps = matrix.shape
     mag_dist_pmf = numpy.zeros((nmags, ndists))
     for i in range(nmags):
         for j in range(ndists):
             mag_dist_pmf[i][j] = numpy.prod(
-                [1 - matrix[i][j][k][l][m][n]
+                [1. - matrix[i][j][k][l][m]
                  for k in range(nlons)
                  for l in range(nlats)
-                 for m in range(neps)
-                 for n in range(ntrts)])
-    return 1 - mag_dist_pmf
+                 for m in range(neps)])
+    return 1. - mag_dist_pmf
 
 
 def mag_dist_eps_pmf(matrix):
@@ -398,18 +413,16 @@ def mag_dist_eps_pmf(matrix):
         second one -- distance histogram bins, third one -- epsilon
         histogram bins.
     """
-    nmags, ndists, nlons, nlats, neps, ntrts = matrix.shape
+    nmags, ndists, nlons, nlats, neps = matrix.shape
     mag_dist_eps_pmf = numpy.zeros((nmags, ndists, neps))
     for i in range(nmags):
         for j in range(ndists):
             for m in range(neps):
                 mag_dist_eps_pmf[i][j][m] = numpy.prod(
-                    [1 - matrix[i][j][k][l][m][n]
+                    [1. - matrix[i][j][k][l][m]
                      for k in range(nlons)
-                     for l in range(nlats)
-                     for n in range(ntrts)]
-                )
-    return 1 - mag_dist_eps_pmf
+                     for l in range(nlats)])
+    return 1. - mag_dist_eps_pmf
 
 
 def lon_lat_pmf(matrix):
@@ -420,17 +433,16 @@ def lon_lat_pmf(matrix):
         2d array. First dimension represents longitude histogram bins,
         second one -- latitude histogram bins.
     """
-    nmags, ndists, nlons, nlats, neps, ntrts = matrix.shape
+    nmags, ndists, nlons, nlats, neps = matrix.shape
     lon_lat_pmf = numpy.zeros((nlons, nlats))
     for k in range(nlons):
         for l in range(nlats):
             lon_lat_pmf[k][l] = numpy.prod(
-                [1 - matrix[i][j][k][l][m][n]
+                [1. - matrix[i][j][k][l][m]
                  for i in range(nmags)
                  for j in range(ndists)
-                 for m in range(neps)
-                 for n in range(ntrts)])
-    return 1 - lon_lat_pmf
+                 for m in range(neps)])
+    return 1. - lon_lat_pmf
 
 
 def mag_lon_lat_pmf(matrix):
@@ -442,39 +454,16 @@ def mag_lon_lat_pmf(matrix):
         second one -- longitude histogram bins, third one -- latitude
         histogram bins.
     """
-    nmags, ndists, nlons, nlats, neps, ntrts = matrix.shape
+    nmags, ndists, nlons, nlats, neps = matrix.shape
     mag_lon_lat_pmf = numpy.zeros((nmags, nlons, nlats))
     for i in range(nmags):
         for k in range(nlons):
             for l in range(nlats):
                 mag_lon_lat_pmf[i][k][l] = numpy.prod(
-                    [1 - matrix[i][j][k][l][m][n]
-                     for j in range(ndists)
-                     for m in range(neps)
-                     for n in range(ntrts)])
-    return 1 - mag_lon_lat_pmf
-
-
-def lon_lat_trt_pmf(matrix):
-    """
-    Fold full disaggregation matrix to longitude / latitude / tectonic region
-    type PMF.
-
-    :returns:
-        3d array. Dimension represent longitude, latitude and tectonic region
-        type histogram bins respectively.
-    """
-    nmags, ndists, nlons, nlats, neps, ntrts = matrix.shape
-    lon_lat_trt_pmf = numpy.zeros((nlons, nlats, ntrts))
-    for k in range(nlons):
-        for l in range(nlats):
-            for n in range(ntrts):
-                lon_lat_trt_pmf[k][l][n] = numpy.prod(
-                    [1 - matrix[i][j][k][l][m][n]
-                     for i in range(nmags)
+                    [1. - matrix[i][j][k][l][m]
                      for j in range(ndists)
                      for m in range(neps)])
-    return 1 - lon_lat_trt_pmf
+    return 1. - mag_lon_lat_pmf
 
 
 # this dictionary is useful to extract a fixed set of
@@ -487,5 +476,5 @@ pmf_map = collections.OrderedDict([
     (('Mag', 'Dist', 'Eps'), mag_dist_eps_pmf),
     (('Lon', 'Lat'), lon_lat_pmf),
     (('Mag', 'Lon', 'Lat'), mag_lon_lat_pmf),
-    (('Lon', 'Lat', 'TRT'), lon_lat_trt_pmf),
+    (('Lon', 'Lat', 'TRT'), lon_lat_pmf),
 ])

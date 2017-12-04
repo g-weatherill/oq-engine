@@ -28,6 +28,7 @@ import copy
 import math
 import socket
 import random
+import zipfile
 import operator
 import warnings
 import tempfile
@@ -512,6 +513,26 @@ class CallableDict(collections.OrderedDict):
         raise KeyError(key)
 
 
+class pack(dict):
+    """
+    Compact a dictionary of lists into a dictionary of arrays.
+    If attrs are given, consider those keys as attributes. For instance,
+
+    >>> p = pack(dict(x=[1], a=[0]), ['a'])
+    >>> p
+    {'x': array([1])}
+    >>> p.a
+    array([0])
+    """
+    def __init__(self, dic, attrs=()):
+        for k, v in dic.items():
+            arr = numpy.array(v)
+            if k in attrs:
+                setattr(self, k, arr)
+            else:
+                self[k] = arr
+
+
 class AccumDict(dict):
     """
     An accumulating dictionary, useful to accumulate variables::
@@ -891,3 +912,18 @@ def _get_free_port():
         if not socket_ready(('127.0.0.1', port)):  # no server listening
             return port  # the port is free
     raise RuntimeError('No free ports in the range 1920:2000')
+
+
+def zipfiles(fnames, archive, mode='w', log=lambda msg: None):
+    """
+    Build a zip archive from the given file names.
+
+    :param fnames: list of path names
+    :param archive: path of the archive
+    """
+    prefix = len(os.path.commonprefix([os.path.dirname(f) for f in fnames]))
+    with zipfile.ZipFile(
+            archive, mode, zipfile.ZIP_DEFLATED, allowZip64=True) as z:
+        for f in fnames:
+            log('Archiving %s' % f)
+            z.write(f, f[prefix:])

@@ -20,6 +20,7 @@ import os
 import sys
 import mock
 import shutil
+import zipfile
 import tempfile
 import unittest
 
@@ -36,9 +37,10 @@ from openquake.commands.engine import run_job
 from openquake.commands.db import db
 from openquake.commands.to_shapefile import to_shapefile
 from openquake.commands.from_shapefile import from_shapefile
+from openquake.commands.zip import zip as zip_cmd
 from openquake.commands import run
 from openquake.commands.upgrade_nrml import upgrade_nrml
-from openquake.qa_tests_data.classical import case_1, case_9
+from openquake.qa_tests_data.classical import case_1, case_9, case_18
 from openquake.qa_tests_data.classical_risk import case_3
 from openquake.qa_tests_data.scenario import case_4
 from openquake.qa_tests_data.event_based import case_5
@@ -286,6 +288,27 @@ class UpgradeNRMLTestCase(unittest.TestCase):
 </nrml>''')
         upgrade_nrml(tmpdir, False, False)
         shutil.rmtree(tmpdir)
+
+
+class ZipTestCase(unittest.TestCase):
+    """
+    Test for the command oq zip
+    """
+    def test_zip(self):
+        ini = os.path.join(os.path.dirname(case_18.__file__), 'job.ini')
+        dtemp = tempfile.mkdtemp()
+        xzip = os.path.join(dtemp, 'x.zip')
+        zip_cmd(ini, xzip)
+        names = sorted(zipfile.ZipFile(xzip).namelist())
+        self.assertEqual(['Wcrust_high_rhypo.hdf5',
+                          'Wcrust_low_rhypo.hdf5',
+                          'Wcrust_med_rhypo.hdf5',
+                          'job.ini',
+                          'nbc_asc_logic_tree.xml',
+                          'source_model_logic_tree.xml',
+                          'vancouver_area_source.xml',
+                          'vancouver_school_sites.csv'], names)
+        shutil.rmtree(dtemp)
 
 
 class SourceModelShapefileConverterTestCase(unittest.TestCase):
