@@ -365,13 +365,6 @@ class AbrahamsonEtAl2014(GMPE):
         if any(idx):
             phi_amp = 0.4 * np.ones_like(phi_al)
             phi_amp[idx] = 0.99 * phi_al[idx]
-            #print(mag, vs30measured, rrup)
-            #print('phi_al: %s' % str(phi_al))
-            #print('magnitude: %.2f' % (mag))
-            #phi_al = np.max(np.column_stack([phi_al,
-            #                                 phi_amp * np.ones_like(phi_al)]),
-            #                axis=1)
-            #raise ValueError('sqrt argument < 0')
         phi_b = np.sqrt(phi_al**2 - phi_amp**2)
         phi = np.sqrt(phi_b**2 * (1 + derAmp)**2 + phi_amp**2)
         return phi
