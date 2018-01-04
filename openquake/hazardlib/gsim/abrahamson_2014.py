@@ -362,7 +362,12 @@ class AbrahamsonEtAl2014(GMPE):
         derAmp = self._get_derivative(C, sa1180, vs30)
         phi_amp = 0.4
         idx = phi_al < phi_amp
-        if any(idx):
+        if np.any(idx):
+            # In the case of small magnitudes and long periods it is possible
+            # for phi_al to take a value less than phi_amp, which would return
+            # a complex value. According to the GMPE authors in this case
+            # phi_amp should be reduced such that it is fractionally smaller
+            # than phi_al
             phi_amp = 0.4 * np.ones_like(phi_al)
             phi_amp[idx] = 0.99 * phi_al[idx]
         phi_b = np.sqrt(phi_al**2 - phi_amp**2)

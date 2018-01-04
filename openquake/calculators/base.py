@@ -30,12 +30,11 @@ from datetime import datetime
 import numpy
 
 from openquake.baselib import (
-    general, hdf5, datastore, __version__ as engine_version)
+    config, general, hdf5, datastore, __version__ as engine_version)
 from openquake.baselib.performance import Monitor
-from openquake.hazardlib.calc.filters import SourceFilter
 from openquake.hazardlib import geo
 from openquake.risklib import riskinput, asset
-from openquake.commonlib import readinput, source, calc, riskmodels
+from openquake.commonlib import readinput, source, calc, riskmodels, writers
 from openquake.baselib.parallel import Starmap, wakeup_pool
 from openquake.baselib.python3compat import with_metaclass
 from openquake.calculators.export import export as exp
@@ -62,9 +61,9 @@ class InvalidCalculationID(Exception):
 class AssetSiteAssociationError(Exception):
     """Raised when there are no hazard sites close enough to any asset"""
 
+
 rlz_dt = numpy.dtype([('uid', 'S200'), ('model', 'S200'),
                       ('gsims', 'S100'), ('weight', F32)])
-
 logversion = True
 
 
@@ -80,6 +79,7 @@ PRECALC_MAP = dict(
                  'event_based_risk', 'ucerf_rupture'],
     event_based_risk=['event_based', 'event_based_rupture', 'ucerf_rupture',
                       'event_based_risk'],
+    gmf_ebrisk=['event_based'],
     ucerf_classical=['ucerf_psha'],
     ucerf_hazard=['ucerf_rupture'])
 
@@ -260,7 +260,6 @@ class BaseCalculator(with_metaclass(abc.ABCMeta)):
 
         :returns: dictionary output_key -> sorted list of exported paths
         """
-        num_rlzs = len(self.datastore['realizations'])
         exported = {}
         if isinstance(exports, tuple):
             fmts = exports
@@ -278,7 +277,7 @@ class BaseCalculator(with_metaclass(abc.ABCMeta)):
             if not fmt:
                 continue
             for key in sorted(keys):  # top level keys
-                if 'rlzs' in key and num_rlzs > 1:
+                if 'rlzs' in key and self.R > 1:
                     continue  # skip individual curves
                 self._export((key, fmt), exported)
             if has_hcurves and self.oqparam.hazard_maps:
@@ -306,13 +305,14 @@ class BaseCalculator(with_metaclass(abc.ABCMeta)):
         """
         Collect the realizations and set the attributes nbytes
         """
-        if hasattr(self, 'rlzs_assoc'):
+        if 'csm_info' in self.datastore and hasattr(self, 'rlzs_assoc'):
             sm_by_rlz = self.datastore['csm_info'].get_sm_by_rlz(
                 self.rlzs_assoc.realizations) or collections.defaultdict(
                     lambda: 'NA')
             self.datastore['realizations'] = numpy.array(
                 [(r.uid, sm_by_rlz[r], gsim_names(r), r.weight)
                  for r in self.rlzs_assoc.realizations], rlz_dt)
+        # do not save the 'realizations' dataset when not possible
         for key in self.datastore:
             self.datastore.set_nbytes(key)
         self.datastore.flush()
@@ -334,6 +334,18 @@ class HazardCalculator(BaseCalculator):
     """
     Base class for hazard calculators based on source models
     """
+    def can_read_parent(self):
+        """
+        :returns:
+            the parent datastore if it is present and can be read from the
+            workers, None otherwise
+        """
+        read_access = (
+            config.distribution.oq_distribute in ('no', 'futures') or
+            config.directory.shared_dir)
+        if self.oqparam.hazard_calculation_id and read_access:
+            return self.datastore.parent
+
     def assoc_assets_sites(self, sitecol):
         """
         :param sitecol: a sequence of sites
@@ -388,6 +400,10 @@ class HazardCalculator(BaseCalculator):
         return precalc
 
     def read_previous(self, precalc_id):
+        """
+        Read the previous calculation datastore by checking the consistency
+        of the calculation_mode, then read the risk data.
+        """
         parent = datastore.read(precalc_id)
         check_precalc_consistency(
             self.oqparam.calculation_mode, parent['oqparam'].calculation_mode)
@@ -397,41 +413,26 @@ class HazardCalculator(BaseCalculator):
                   vars(parent['oqparam']).items()
                   if name not in vars(self.oqparam)}
         self.save_params(**params)
-        self.read_risk_data()
+        return parent
 
-    def basic_pre_execute(self):
+    def read_inputs(self):
+        """
+        Read risk data and sources if any
+        """
         oq = self.oqparam
+        wakeup_pool()  # fork before reading the data
         self.read_risk_data()
         if 'source' in oq.inputs:
-            wakeup_pool()  # fork before reading the source model
-            if oq.hazard_calculation_id:  # already stored csm
-                logging.info('Reusing composite source model of calc #%d',
-                             oq.hazard_calculation_id)
-                with datastore.read(oq.hazard_calculation_id) as dstore:
-                    csm = dstore['composite_source_model']
-            else:
-                csm = self.read_csm()
-            logging.info('Prefiltering the CompositeSourceModel')
-            with self.monitor('prefiltering source model',
-                              autoflush=True, measuremem=True):
-                src_filter = SourceFilter(self.sitecol, oq.maximum_distance)
-                self.csm = csm.filter(src_filter)
+            with self.monitor('reading composite source model', autoflush=1):
+                self.csm = readinput.get_composite_source_model(oq)
+            if self.is_stochastic:
+                # initialize the rupture serial numbers before the
+                # filtering; in this way the serials are independent
+                # from the site collection; this is ultra-fast
+                self.csm.init_serials()
             self.csm.info.gsim_lt.check_imts(oq.imtls)
             self.rup_data = {}
         self.init()
-
-    def read_csm(self):
-        if 'source' not in self.oqparam.inputs:
-            raise ValueError('Missing source_model_logic_tree in %(job_ini)s '
-                             'or missing --hc option' % self.oqparam.inputs)
-        with self.monitor('reading composite source model', autoflush=True):
-                csm = readinput.get_composite_source_model(self.oqparam)
-        if self.is_stochastic:
-            # initialize the rupture serial numbers before the
-            # filtering; in this way the serials are independent
-            # from the site collection; this is ultra-fast
-            csm.init_serials()
-        return csm
 
     def pre_execute(self):
         """
@@ -444,12 +445,16 @@ class HazardCalculator(BaseCalculator):
         if self.pre_calculator is not None:
             # the parameter hazard_calculation_id is only meaningful if
             # there is a precalculator
-            self.precalc = (self.compute_previous() if precalc_id is None
-                            else self.read_previous(precalc_id))
+            if precalc_id is None:
+                self.precalc = self.compute_previous()
+            else:
+                self.precalc = None
+                self.read_previous(precalc_id)
+                self.read_risk_data()
             self.init()
         else:  # we are in a basic calculator
             self.precalc = None
-            self.basic_pre_execute()
+            self.read_inputs()
             if 'source' in self.oqparam.inputs:
                 job_info.update(readinput.get_job_info(
                     self.oqparam, self.csm, self.sitecol))
@@ -470,6 +475,7 @@ class HazardCalculator(BaseCalculator):
             self.rlzs_assoc = self.datastore['csm_info'].get_rlzs_assoc()
         elif hasattr(self, 'csm'):
             self.rlzs_assoc = self.csm.info.get_rlzs_assoc()
+            self.datastore['csm_info'] = self.csm.info
         else:  # build a fake; used by risk-from-file calculators
             self.datastore['csm_info'] = fake = source.CompositionInfo.fake()
             self.rlzs_assoc = fake.get_rlzs_assoc()
@@ -485,13 +491,11 @@ class HazardCalculator(BaseCalculator):
             self.sitecol, self.assetcol = (
                 readinput.get_sitecol_assetcol(self.oqparam, self.exposure))
             # NB: using hdf5.vstr would fail for large exposures;
-            # the datastore could become corrupt, and also ultra-strange
+            # the datastore could become corrupt, and also ultra-strange things
             # may happen (i.e. having the sitecol saved inside asset_refs!!)
             arefs = numpy.array(self.exposure.asset_refs)
             self.datastore['asset_refs'] = arefs
             self.datastore.set_attrs('asset_refs', nbytes=arefs.nbytes)
-            logging.info('Read %d assets on %d sites',
-                         len(self.assetcol), len(self.sitecol))
 
     def get_min_iml(self, oq):
         # set the minimum_intensity
@@ -653,12 +657,12 @@ class RiskCalculator(HazardCalculator):
                 self.assetcol, num_ruptures,
                 oq.master_seed, oq.asset_correlation)
 
-    def build_riskinputs(self, kind, eps=numpy.zeros(0), eids=None):
+    def build_riskinputs(self, kind, eps=None, eids=None):
         """
         :param kind:
             kind of hazard getter, can be 'poe' or 'gmf'
         :param eps:
-            a matrix of epsilons (possibly empty)
+            a matrix of epsilons (or None)
         :param eids:
             an array of event IDs (or None)
         :returns:
@@ -684,21 +688,24 @@ class RiskCalculator(HazardCalculator):
                 sids = numpy.array([sid for sid, _weight in block])
                 reduced_assets = assets_by_site[sids]
                 # dictionary of epsilons for the reduced assets
-                reduced_eps = collections.defaultdict(F32)
+                reduced_eps = {}
                 for assets in reduced_assets:
                     for ass in assets:
                         ass.tagmask = self.tagmask[ass.ordinal]
-                        if len(eps):
+                        if eps is not None and len(eps):
                             reduced_eps[ass.ordinal] = eps[ass.ordinal]
                 # build the riskinputs
+                dstore = self.can_read_parent() or self.datastore
                 if kind == 'poe':  # hcurves, shape (R, N)
-                    getter = calc.PmapGetter(self.datastore, sids)
+                    getter = calc.PmapGetter(dstore, sids)
+                    getter.num_rlzs = self.R
                 else:  # gmf
-                    getter = riskinput.GmfDataGetter(self.datastore, sids)
-                hgetter = riskinput.HazardGetter(
-                    self.datastore, kind, getter, imtls, eids)
-                hgetter.init()  # read the hazard data
-                ri = riskinput.RiskInput(hgetter, reduced_assets, reduced_eps)
+                    getter = riskinput.GmfDataGetter(
+                        dstore, sids, self.R, eids)
+                # if dstore is self.datastore:
+                # read the hazard data in the controller node
+                getter.init()  # READING ALWAYS UNTIL I DISCOVER THE BUG!
+                ri = riskinput.RiskInput(getter, reduced_assets, reduced_eps)
                 if ri.weight > 0:
                     riskinputs.append(ri)
             assert riskinputs
@@ -719,6 +726,7 @@ class RiskCalculator(HazardCalculator):
 
     def combine(self, acc, res):
         return acc + res
+
 
 U16 = numpy.uint16
 U32 = numpy.uint32
@@ -745,7 +753,7 @@ def get_gmv_data(sids, gmfs):
 def get_gmfs(calculator):
     """
     :param calculator: a scenario_risk/damage or gmf_ebrisk calculator
-    :returns: a pair (eids, gmfs) where gmfs is a matrix of shape (R, N, E, I)
+    :returns: a pair (eids, R) where R is the number of realizations
     """
     dstore = calculator.datastore
     oq = calculator.oqparam
@@ -778,7 +786,7 @@ def get_gmfs(calculator):
         events = numpy.zeros(E, readinput.stored_event_dt)
         events['eid'] = eids
         dstore['events'] = events
-        return eids, gmfs
+        return eids, len(gmfs)
 
     elif calculator.precalc:  # from previous step
         num_assocs = dstore['csm_info'].get_num_rlzs()
@@ -787,7 +795,11 @@ def get_gmfs(calculator):
         gmfs = numpy.zeros((num_assocs, N, E, I))
         for g, gsim in enumerate(calculator.precalc.gsims):
             gmfs[g, sitecol.sids] = calculator.precalc.gmfa[gsim]
-        return eids, gmfs
+        return eids, len(gmfs)
+
+    else:  # with --hc option
+        return (calculator.datastore['events']['eid'],
+                len(calculator.datastore['realizations']))
 
 
 def save_gmf_data(dstore, sitecol, gmfs):
@@ -807,3 +819,50 @@ def save_gmf_data(dstore, sitecol, gmfs):
         offset += n
     dstore.save_vlen('gmf_data/indices', lst)
     dstore.set_attrs('gmf_data', num_gmfs=len(gmfs))
+
+
+def import_gmfs(dstore, fname, sids):
+    """
+    Import in the datastore a ground motion field CSV file.
+
+    :param dstore: the datastore
+    :param fname: the CSV file
+    :param sids: the site IDs (complete)
+    :returns: event_ids, num_rlzs
+    """
+    array = writers.read_composite_array(fname)
+    n_imts = len(array.dtype.names[3:])  # rlzi, sid, eid, gmv_PGA, ...
+    gmf_data_dt = numpy.dtype(
+        [('rlzi', U16), ('sid', U32), ('eid', U64), ('gmv', (F32, (n_imts,)))])
+    # store the events
+    eids = numpy.unique(array['eid'])
+    eids.sort()
+    events = numpy.zeros(len(eids), readinput.stored_event_dt)
+    events['eid'] = eids
+    dstore['events'] = events
+    # store the GMFs
+    dic = general.group_array(array.view(gmf_data_dt), 'sid')
+    lst = []
+    offset = 0
+    for sid in sids:
+        n = len(dic.get(sid, []))
+        lst.append(numpy.array([(offset, offset + n)], riskinput.indices_dt))
+        if n:
+            offset += n
+            dstore.extend('gmf_data/data', dic[sid])
+    dstore.save_vlen('gmf_data/indices', lst)
+
+    # FIXME: if there is no data for the maximum realization
+    # the inferred number of realizations will be wrong
+    num_rlzs = array['rlzi'].max() + 1
+
+    # compute gmdata
+    dic = general.group_array(array.view(gmf_data_dt), 'rlzi')
+    gmdata = {r: numpy.zeros(n_imts + 2, F32) for r in range(num_rlzs)}
+    for r in dic:
+        gmv = dic[r]['gmv']
+        rec = gmdata[r]  # (imt1, ..., imtM, nevents, nbytes)
+        rec[:-2] += gmv.sum(axis=0)
+        rec[-2] += len(gmv)
+        rec[-1] += gmv.nbytes
+    return eids, num_rlzs, gmdata

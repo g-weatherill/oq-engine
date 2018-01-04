@@ -164,12 +164,8 @@ class EventBasedRiskTestCase(CalculatorTestCase):
                       exports='csv', concurrent_tasks='4')
 
         # test the number of bytes saved in the rupture records
-        grp00 = self.calc.datastore.get_attr('ruptures/grp-00', 'nbytes')
-        grp02 = self.calc.datastore.get_attr('ruptures/grp-02', 'nbytes')
-        grp03 = self.calc.datastore.get_attr('ruptures/grp-03', 'nbytes')
-        self.assertEqual(grp00, 550)
-        self.assertEqual(grp02, 550)
-        self.assertEqual(grp03, 220)
+        nbytes = self.calc.datastore.get_attr('ruptures', 'nbytes')
+        self.assertEqual(nbytes, 1272)
 
         hc_id = self.calc.datastore.calc_id
         self.run_calc(case_3.__file__, 'job.ini',
@@ -259,7 +255,7 @@ class EventBasedRiskTestCase(CalculatorTestCase):
             'expected/portfolio_loss.txt', fname, delta=1E-5)
         os.remove(fname)
 
-    @attr('qa', 'risk', 'case_7a')
+    @attr('qa', 'risk', 'event_based_risk')
     def test_case_7a(self):
         # case with  <insuranceLimit isAbsolute="false"/>
         self.run_calc(case_7a.__file__,  'job_h.ini')

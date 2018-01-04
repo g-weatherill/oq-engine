@@ -40,8 +40,7 @@ class OqParam(valid.ParamSet):
         vs30='reference_vs30_value',
         z1pt0='reference_depth_to_1pt0km_per_sec',
         z2pt5='reference_depth_to_2pt5km_per_sec',
-        backarc='reference_backarc',
-    )
+        backarc='reference_backarc')
     asset_loss_table = valid.Param(valid.boolean, False)
     area_source_discretization = valid.Param(
         valid.NoneOr(valid.positivefloat), None)
@@ -233,8 +232,8 @@ class OqParam(valid.ParamSet):
         elif (self.calculation_mode == 'event_based_risk'
               and self.conditional_loss_poes and not self.asset_loss_table):
             raise InvalidFile(
-                '%s: conditional_loss_poes is set, but the loss maps cannot '
-                'be generated unless you set asset_loss_table=true' % job_ini)
+                '%s: asset_loss_table is not set, probably you want to remove'
+                ' conditional_loss_poes' % job_ini)
 
         # check for GMFs from file
         if (self.inputs.get('gmfs', '').endswith('.csv') and not self.sites and

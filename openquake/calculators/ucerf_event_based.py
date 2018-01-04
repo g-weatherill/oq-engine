@@ -404,6 +404,13 @@ class UCERFSource(object):
         self.msr = msr
         self.mesh_spacing = mesh_spacing
         self.tectonic_region_type = trt
+        self.num_ruptures = 0  # not set yet
+
+    def count_ruptures(self):
+        """
+        The length of the rupture array if the branch_id is set, else 0
+        """
+        return len(self.mags) if hasattr(self, 'mags') else 0
 
     def new(self, grp_id, branch_id):
         """
@@ -641,6 +648,10 @@ class UCERFSource(object):
                 sources.append(ps)
         return sources
 
+    def filter_sites_by_distance_to_source(self, integration_distance, sites):
+        # do not filter
+        return sites
+
 
 def build_idx_set(branch_id, start_date):
     """
@@ -704,12 +715,11 @@ def compute_ruptures(sources, src_filter, gsims, param, monitor):
                     indices = r_sites.indices
                     events = []
                     for _ in range(n_occ):
-                        events.append((0, ses_idx, sample))
+                        events.append((0, src.src_group_id, ses_idx, sample))
                     if events:
                         evs = numpy.array(events, calc.event_dt)
                         ebruptures.append(
-                            calc.EBRupture(rup, indices, evs,
-                                           src.src_group_id, serial))
+                            calc.EBRupture(rup, indices, evs, serial))
                         serial += 1
     res.num_events = event_based.set_eids(ebruptures)
     res[src.src_group_id] = ebruptures
@@ -826,8 +836,9 @@ def compute_losses(ssm, src_filter, param, riskmodel,
     rlzs_by_gsim = rlzs_assoc.get_rlzs_by_gsim(DEFAULT_TRT)
     getter = riskinput.GmfGetter(
         rlzs_by_gsim, ebruptures, src_filter.sitecol, imts, min_iml,
-        trunc_level, correl_model, samples[grp_id])
-    ri = riskinput.RiskInputFromRuptures(getter)
+        src_filter.integration_distance, trunc_level, correl_model,
+        samples[grp_id])
+    ri = riskinput.RiskInput(getter, param['assetcol'].assets_by_site())
     res.append(event_based_risk(ri, riskmodel, param, monitor))
     res.sm_id = ssm.sm_id
     res.num_events = len(ri.hazard_getter.eids)

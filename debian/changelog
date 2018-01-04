@@ -1,7 +1,38 @@
+  [Nick Ackerley]
+  * Some improvements to the plotting routines of the HMTK
+
   [Michele Simionato]
+  * Changed `oq run job_h.ini,job_r.ini` to disable concurrency in the second
+    run, as a workaround on reading the parent datastore from workers
+  * Removed the ability to run `oq engine --run job_h.ini,job_r.ini`
+  * Forbidden the site model in gmf_ebrisk calculations
+  * When the option `--hc` is given the ruptures can now be read directly
+    from the workers, thus saving some startup time
+  * Optimized the storage of the ruptures: the site IDs are not saved anymore
+  * Added a check for missing risk_investigation_time
+  * Reduced the data transfer in the gmf_ebrisk calculator
+  * Now the gmf_ebrisk calculator builds the aggregate loss curves too
+  * Extended the gmf_ebrisk calculator to use the GMFs produced by an event
+    based hazard calculation, both via CSV and via the --hc option
+  * Fixed a performance bug in the computations of the aggregate loss curves
+    by reading the full event loss table at once
+  * Fixed oq zip to work with gmf_ebrisk calculations
+  * Fixed a serious bug in the gmf_ebrisk calculator: the results were in most
+    cases wrong and dependent on the number of spawned tasks
+  * Now the `master_seed` controls the generation of the epsilons in all
+    situations (before in event_based_risk without `asset_correlation` it was
+    managed by `random_seed`)
+  * Changed the management of the epsilons in the gmf_ebrisk calculator to
+    be the same as in the event_based_risk calculator
+  * Added a check on the input files: the listed paths must be relative paths
+  * Fixed a bug when storing the disagg-bins in the case the lenghts of the
+    arrays are not the same for all sites
+  * In the case of a single tile the prefiltering was applied twice: fixed the
+    problem and generally improved the filtering/weighting of the sources
   * Fixed the CSV exporter for disaggregation outputs when iml_disagg is set
 
   [Graeme Weatherill]
+  * Fixed ASK14 GMPE behaviour to remove ValueError
   * Implements comprehensive suite of NGA East ground motion models for
     central and eastern United States
   * Minor modification of check_gsim functions to permit instantiated classes

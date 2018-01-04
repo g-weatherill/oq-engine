@@ -17,11 +17,15 @@
 # along with OpenQuake. If not, see <http://www.gnu.org/licenses/>.
 
 from __future__ import division
+import collections
+import operator
 import warnings
+import logging
 import numpy
 import h5py
+import mock
 
-from openquake.baselib import hdf5
+from openquake.baselib import hdf5, general
 from openquake.baselib.python3compat import decode
 from openquake.hazardlib.geo.mesh import (
     surface_to_mesh, point3d, RectangularMesh)
@@ -43,9 +47,8 @@ F32 = numpy.float32
 U64 = numpy.uint64
 F64 = numpy.float64
 
-event_dt = numpy.dtype([('eid', U64), ('ses', U32), ('sample', U32)])
-
-sids_dt = h5py.special_dtype(vlen=U32)
+event_dt = numpy.dtype([('eid', U64), ('grp_id', U16), ('ses', U32),
+                        ('sample', U32)])
 
 BaseRupture.init()  # initialize rupture codes
 
@@ -93,6 +96,7 @@ class PmapGetter(object):
         self.weights = [rlz.weight for rlz in self.rlzs_assoc.realizations]
         self.num_levels = len(self.dstore['oqparam'].imtls.array)
         self.sids = sids
+        self.eids = None
         self.nbytes = 0
         if sids is None:
             self.sids = dstore['sitecol'].complete.sids
@@ -113,6 +117,27 @@ class PmapGetter(object):
                         pmap[sid] = probability_map.ProbabilityCurve(dset[idx])
                 self._pmap_by_grp[grp] = pmap
                 self.nbytes += pmap.nbytes
+
+    def init(self):
+        if hasattr(self, 'data'):  # already initialized
+            return
+        self.dstore.open()  # if not
+        self.imtls = self.dstore['oqparam'].imtls
+        self.data = collections.OrderedDict()
+        hcurves = self.get_hcurves(self.imtls)  # shape (R, N)
+        for sid, hcurve_by_rlz in zip(self.sids, hcurves.T):
+            self.data[sid] = datadict = {}
+            for rlzi, hcurve in enumerate(hcurve_by_rlz):
+                datadict[rlzi] = lst = [None for imt in self.imtls]
+                for imti, imt in enumerate(self.imtls):
+                    lst[imti] = hcurve[imt]  # imls
+
+    def get_hazard(self, gsim=None):
+        """
+        :param gsim: ignored
+        :returns: an OrderedDict rlzi -> datadict
+        """
+        return self.data
 
     def get(self, rlzi, grp=None):
         """
@@ -195,6 +220,7 @@ class PmapGetter(object):
             return self.rlzs_assoc.compute_pmap_stats(dic, [stats.mean_curve])
 
 # ######################### hazard maps ################################### #
+
 
 # cutoff value for the poe
 EPSILON = 1E-30
@@ -440,7 +466,7 @@ class RuptureData(object):
                              set('mag strike dip rake hypo_depth'.split()))
         self.dt = numpy.dtype([
             ('rup_id', U32), ('multiplicity', U16), ('eidx', U32),
-            ('numsites', U32), ('occurrence_rate', F64),
+            ('occurrence_rate', F64),
             ('mag', F32), ('lon', F32), ('lat', F32), ('depth', F32),
             ('strike', F32), ('dip', F32), ('rake', F32),
             ('boundary', hdf5.vstr)] + [(param, F32) for param in self.params])
@@ -464,7 +490,7 @@ class RuptureData(object):
             except AttributeError:  # for nonparametric sources
                 rate = numpy.nan
             data.append(
-                (ebr.serial, ebr.multiplicity, ebr.eidx1, len(ebr.sids), rate,
+                (ebr.serial, ebr.multiplicity, ebr.eidx1, rate,
                  rup.mag, point.x, point.y, point.z, rup.surface.get_strike(),
                  rup.surface.get_dip(), rup.rake,
                  'MULTIPOLYGON(%s)' % decode(bounds)) + ruptparams)
@@ -477,7 +503,7 @@ class RuptureSerializer(object):
     `ruptures` and `sids`.
     """
     rupture_dt = numpy.dtype([
-        ('serial', U32), ('code', U8), ('sidx', U32),
+        ('serial', U32), ('code', U8),
         ('eidx1', U32), ('eidx2', U32), ('pmfx', I32), ('seed', U32),
         ('mag', F32), ('rake', F32), ('occurrence_rate', F32),
         ('hypo', point3d), ('sx', U16), ('sy', U8), ('sz', U16),
@@ -506,7 +532,7 @@ class RuptureSerializer(object):
             assert sz < TWO16, 'The rupture mesh spacing is too small'
             hypo = rup.hypocenter.x, rup.hypocenter.y, rup.hypocenter.z
             rate = getattr(rup, 'occurrence_rate', numpy.nan)
-            tup = (ebrupture.serial, rup.code, ebrupture.sidx,
+            tup = (ebrupture.serial, rup.code,
                    ebrupture.eidx1, ebrupture.eidx2,
                    getattr(ebrupture, 'pmfx', -1),
                    rup.seed, rup.mag, rup.rake, rate, hypo,
@@ -517,8 +543,6 @@ class RuptureSerializer(object):
 
     def __init__(self, datastore):
         self.datastore = datastore
-        self.sids = {}  # dictionary sids -> sidx
-        self.data = []
         self.nbytes = 0
 
     def save(self, ebruptures, eidx=0):
@@ -529,30 +553,21 @@ class RuptureSerializer(object):
         :param eidx: the last event index saved
         """
         pmfbytes = 0
-        # set the reference to the sids (sidx) correctly
         for ebr in ebruptures:
             mul = ebr.multiplicity
             ebr.eidx1 = eidx
             ebr.eidx2 = eidx + mul
             eidx += mul
-            sids_tup = tuple(ebr.sids)
-            try:
-                ebr.sidx = self.sids[sids_tup]
-            except KeyError:
-                ebr.sidx = self.sids[sids_tup] = len(self.sids)
-                self.data.append(ebr.sids)
-
             rup = ebr.rupture
             if hasattr(rup, 'pmf'):
                 pmfs = numpy.array([(ebr.serial, rup.pmf)], self.pmfs_dt)
-                dset = self.datastore.extend(
-                    'pmfs/grp-%02d' % ebr.grp_id, pmfs)
+                dset = self.datastore.extend('pmfs', pmfs)
                 ebr.pmfx = len(dset) - 1
                 pmfbytes += self.pmfs_dt.itemsize + rup.pmf.nbytes
 
         # store the ruptures in a compact format
         array, nbytes = self.get_array_nbytes(ebruptures)
-        key = 'ruptures/grp-%02d' % ebr.grp_id
+        key = 'ruptures'
         try:
             dset = self.datastore.getitem(key)
         except KeyError:  # not created yet
@@ -570,34 +585,50 @@ class RuptureSerializer(object):
         self.datastore.flush()
 
     def close(self):
-        """
-        Flush the ruptures and the site IDs on the datastore
-        """
-        self.sids.clear()
-        if self.data:
-            self.datastore.save_vlen('sids', self.data)
-            del self.data[:]
+        pass
 
 
-def get_ruptures(dstore, events, grp_id):
+def get_ruptures_by_grp(dstore, slice_=slice(None), rup_id=None):
     """
     Extracts the ruptures of the given grp_id
     """
-    return _get_ruptures(dstore, events, [grp_id], None)
+    if slice_.stop is None:
+        n = len(dstore['ruptures']) - (slice_.start or 0)
+        logging.info('Reading %d ruptures from the datastore', n)
+    # disable check on PlaceSurface to support UCERF ruptures
+    with mock.patch(
+            'openquake.hazardlib.geo.surface.PlanarSurface.'
+            'IMPERFECT_RECTANGLE_TOLERANCE', numpy.inf):
+        return general.groupby(
+            RuptureGetter(dstore, slice_), operator.attrgetter('grp_id'))
 
 
-def _get_ruptures(dstore, events, grp_ids, rup_id):
-    oq = dstore['oqparam']
-    grp_trt = dstore['csm_info'].grp_trt()
-    for grp_id in grp_ids:
-        trt = grp_trt[grp_id]
-        grp = 'grp-%02d' % grp_id
-        try:
-            recs = dstore['ruptures/' + grp]
-        except KeyError:  # no ruptures in grp
-            continue
+class RuptureGetter(object):
+    """
+    Iterable over ruptures.
+
+    :param dstore: a DataStore instance
+    :param slice_: a slice of ruptures (default: all)
+    :param grp_id: the group ID of the ruptures (default: all)
+    :param rup_id: a specific rupture (default: all)
+    """
+    def __init__(self, dstore, slice_=slice(None), grp_id=None, rup_id=None):
+        self.dstore = dstore
+        self.slice = slice_
+        self.grp_id = grp_id
+        self.rup_id = rup_id
+
+    def __iter__(self):
+        self.dstore.open()  # if needed
+        oq = self.dstore['oqparam']
+        grp_trt = self.dstore['csm_info'].grp_trt()
+        recs = self.dstore['ruptures'][self.slice]
         for rec in recs:
-            if rup_id is not None and rup_id != rec['serial']:
+            if self.rup_id is not None and self.rup_id != rec['serial']:
+                continue
+            evs = self.dstore['events'][rec['eidx1']:rec['eidx2']]
+            grp_id = evs['grp_id'][0]
+            if self.grp_id is not None and self.grp_id != grp_id:
                 continue
             mesh = rec['points'].reshape(rec['sx'], rec['sy'], rec['sz'])
             rupture_cls, surface_cls, source_cls = BaseRupture.types[
@@ -615,10 +646,10 @@ def _get_ruptures(dstore, events, grp_ids, rup_id):
             rupture.seed = rec['seed']
             rupture.hypocenter = geo.Point(*rec['hypo'])
             rupture.occurrence_rate = rec['occurrence_rate']
-            rupture.tectonic_region_type = trt
+            rupture.tectonic_region_type = grp_trt[grp_id]
             pmfx = rec['pmfx']
             if pmfx != -1:
-                rupture.pmf = dstore['pmfs/' + grp][pmfx]
+                rupture.pmf = self.dstore['pmfs'][pmfx]
             if surface_cls is geo.PlanarSurface:
                 rupture.surface = geo.PlanarSurface.from_array(
                     mesh_spacing, rec['points'])
@@ -631,11 +662,8 @@ def _get_ruptures(dstore, events, grp_ids, rup_id):
                 m = mesh[0]
                 rupture.surface.mesh = RectangularMesh(
                     m['lon'], m['lat'], m['depth'])
-            sids = dstore['sids'][rec['sidx']]
-            evs = events[rec['eidx1']:rec['eidx2']]
-            ebr = EBRupture(rupture, sids, evs, grp_id, rec['serial'])
+            ebr = EBRupture(rupture, (), evs, rec['serial'])
             ebr.eidx1 = rec['eidx1']
             ebr.eidx2 = rec['eidx2']
-            ebr.sidx = rec['sidx']
             # not implemented: rupture_slip_direction
             yield ebr

@@ -185,8 +185,6 @@ class DataStore(collections.MutableMapping):
         if self.hdf5 is None:  # not already open
             mode = self.mode or 'r+' if os.path.exists(self.hdf5path) else 'w'
             self.hdf5 = hdf5.File(self.hdf5path, mode, libver='latest')
-            if self.parent != () and self.parent.hdf5 is None:
-                self.parent.open()
 
     @property
     def export_dir(self):
@@ -392,6 +390,7 @@ class DataStore(collections.MutableMapping):
             val = self.hdf5[key]
         except KeyError:
             if self.parent != ():
+                self.parent.open()
                 try:
                     val = self.parent[key]
                 except KeyError:
@@ -445,7 +444,9 @@ class DataStore(collections.MutableMapping):
         return key in self.hdf5 or self.parent and key in self.parent.hdf5
 
     def __len__(self):
-        return sum(1 for f in self)
+        if self.hdf5 is None:  # closed
+            return 0
+        return sum(1 for f in self.hdf5)
 
     def __hash__(self):
         return self.calc_id

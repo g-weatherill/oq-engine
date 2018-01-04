@@ -28,8 +28,9 @@ from openquake.baselib.general import AccumDict
 from openquake.hazardlib.calc.hazard_curve import (
     pmap_from_grp, pmap_from_trt, ProbabilityMap)
 from openquake.hazardlib.stats import compute_pmap_stats
+from openquake.hazardlib import source
 from openquake.hazardlib.calc.filters import SourceFilter
-from openquake.commonlib import source, calc
+from openquake.commonlib import calc
 from openquake.calculators import base
 
 U16 = numpy.uint16
@@ -54,7 +55,7 @@ def saving_sources_by_task(iterargs, dstore):
         for src in args[0]:  # collect source data
             data.append((i, src.nsites, src.num_ruptures, src.weight))
         yield args
-    dstore['task_sources'] = encode(source_ids)
+    dstore['task_info/task_sources'] = encode(source_ids)
     dstore.extend('task_info/source_data', numpy.array(data, source_data_dt))
 
 
@@ -98,11 +99,8 @@ class PSHACalculator(base.HazardCalculator):
                 if pmap[grp_id]:
                     acc[grp_id] |= pmap[grp_id]
             for src_id, nsites, srcweight, calc_time in pmap.calc_times:
-                src_id = src_id.split(':', 1)[0]
-                try:
-                    info = self.csm.infos[grp_id, src_id]
-                except KeyError:
-                    continue
+                srcid = src_id.split(':', 1)[0]
+                info = self.csm.infos[srcid]
                 info.calc_time += calc_time
                 info.num_sites = max(info.num_sites, nsites)
                 info.num_split += 1
@@ -159,14 +157,11 @@ class PSHACalculator(base.HazardCalculator):
         oq = self.oqparam
         opt = self.oqparam.optimize_same_id_sources
         num_tiles = math.ceil(len(self.sitecol) / oq.sites_per_tile)
+        tasks_per_tile = oq.concurrent_tasks / math.sqrt(num_tiles)
         if num_tiles > 1:
             tiles = self.sitecol.split_in_tiles(num_tiles)
         else:
             tiles = [self.sitecol]
-        maxweight = self.csm.get_maxweight(oq.concurrent_tasks)
-        numheavy = len(self.csm.get_sources('heavy', maxweight))
-        logging.info('Using maxweight=%d, numheavy=%d, tiles=%d',
-                     maxweight, numheavy, len(tiles))
         param = dict(truncation_level=oq.truncation_level, imtls=oq.imtls)
         for tile_i, tile in enumerate(tiles, 1):
             num_tasks = 0
@@ -175,22 +170,24 @@ class PSHACalculator(base.HazardCalculator):
                 logging.info('Prefiltering tile %d of %d', tile_i, len(tiles))
                 src_filter = SourceFilter(tile, oq.maximum_distance)
                 csm = self.csm.filter(src_filter)
+            maxweight = csm.get_maxweight(tasks_per_tile)
+            numheavy = len(csm.get_sources('heavy', maxweight))
+            logging.info('Using maxweight=%d, numheavy=%d',
+                         maxweight, numheavy)
             if csm.has_dupl_sources and not opt:
                 logging.warn('Found %d duplicated sources, use oq info',
                              csm.has_dupl_sources)
             for sg in csm.src_groups:
                 if sg.src_interdep == 'mutex':
                     gsims = self.csm.info.gsim_lt.get_gsims(sg.trt)
-                    self.csm.add_infos(sg.sources)  # update self.csm.infos
-                    yield sg, src_filter, gsims, param, monitor
+                    yield sg, csm.src_filter, gsims, param, monitor
                     num_tasks += 1
                     num_sources += len(sg.sources)
             # NB: csm.get_sources_by_trt discards the mutex sources
-            for trt, sources in self.csm.get_sources_by_trt(opt).items():
+            for trt, sources in csm.get_sources_by_trt(opt).items():
                 gsims = self.csm.info.gsim_lt.get_gsims(trt)
-                self.csm.add_infos(sources)  # update with unsplit sources
                 for block in csm.split_in_blocks(maxweight, sources):
-                    yield block, src_filter, gsims, param, monitor
+                    yield block, csm.src_filter, gsims, param, monitor
                     num_tasks += 1
                     num_sources += len(block)
             logging.info('Sent %d sources in %d tasks', num_sources, num_tasks)
@@ -295,16 +292,23 @@ class ClassicalCalculator(PSHACalculator):
         self.datastore.flush()
 
         with self.monitor('sending pmaps', autoflush=True, measuremem=True):
-            monitor = self.monitor('build_hcurves_and_stats')
-            hstats = oq.hazard_stats()
-            allargs = (
-                (calc.PmapGetter(self.datastore, tile.sids, self.rlzs_assoc),
-                 hstats, monitor)
-                for tile in self.sitecol.split_in_tiles(oq.concurrent_tasks))
             ires = parallel.Starmap(
-                self.core_task.__func__, allargs).submit_all()
+                self.core_task.__func__, self.gen_args()
+            ).submit_all()
         nbytes = ires.reduce(self.save_hcurves)
         return nbytes
+
+    def gen_args(self):
+        """
+        :yields: pgetter, hstats, monitor
+        """
+        monitor = self.monitor('build_hcurves_and_stats')
+        hstats = self.oqparam.hazard_stats()
+        for t in self.sitecol.split_in_tiles(self.oqparam.concurrent_tasks):
+            pgetter = calc.PmapGetter(self.datastore, t.sids, self.rlzs_assoc)
+            if not self.can_read_parent():  # read now, not in the workers
+                pgetter.init()
+            yield pgetter, hstats, monitor
 
     def save_hcurves(self, acc, pmap_by_kind):
         """
