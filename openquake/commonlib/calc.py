@@ -91,6 +91,7 @@ class PmapGetter(object):
     :param rlzs_assoc: a RlzsAssoc instance (if None, infers it)
     """
     def __init__(self, dstore, sids=None, rlzs_assoc=None):
+        dstore.open()  # if not
         self.rlzs_assoc = rlzs_assoc or dstore['csm_info'].get_rlzs_assoc()
         self.dstore = dstore
         self.weights = [rlz.weight for rlz in self.rlzs_assoc.realizations]
@@ -100,6 +101,11 @@ class PmapGetter(object):
         self.nbytes = 0
         if sids is None:
             self.sids = dstore['sitecol'].complete.sids
+
+    def init(self):
+        if hasattr(self, 'data'):  # already initialized
+            return
+        self.dstore.open()  # if not
         # populate _pmap_by_grp
         self._pmap_by_grp = {}
         if 'poes' in self.dstore:
@@ -118,13 +124,12 @@ class PmapGetter(object):
                 self._pmap_by_grp[grp] = pmap
                 self.nbytes += pmap.nbytes
 
-    def init(self):
-        if hasattr(self, 'data'):  # already initialized
-            return
-        self.dstore.open()  # if not
         self.imtls = self.dstore['oqparam'].imtls
         self.data = collections.OrderedDict()
-        hcurves = self.get_hcurves(self.imtls)  # shape (R, N)
+        try:
+            hcurves = self.get_hcurves(self.imtls)  # shape (R, N)
+        except IndexError:  # no data
+            return
         for sid, hcurve_by_rlz in zip(self.sids, hcurves.T):
             self.data[sid] = datadict = {}
             for rlzi, hcurve in enumerate(hcurve_by_rlz):
@@ -184,6 +189,7 @@ class PmapGetter(object):
             the kind of PoEs to extract; if not given, returns the realization
             if there is only one or the statistics otherwise.
         """
+        self.init()  # if not already initialized
         num_rlzs = len(self.weights)
         if not kind:  # use default
             if 'hcurves' in self.dstore:
@@ -503,7 +509,7 @@ class RuptureSerializer(object):
     `ruptures` and `sids`.
     """
     rupture_dt = numpy.dtype([
-        ('serial', U32), ('code', U8),
+        ('serial', U32), ('grp_id', U16), ('code', U8),
         ('eidx1', U32), ('eidx2', U32), ('pmfx', I32), ('seed', U32),
         ('mag', F32), ('rake', F32), ('occurrence_rate', F32),
         ('hypo', point3d), ('sx', U16), ('sy', U8), ('sz', U16),
@@ -532,7 +538,7 @@ class RuptureSerializer(object):
             assert sz < TWO16, 'The rupture mesh spacing is too small'
             hypo = rup.hypocenter.x, rup.hypocenter.y, rup.hypocenter.z
             rate = getattr(rup, 'occurrence_rate', numpy.nan)
-            tup = (ebrupture.serial, rup.code,
+            tup = (ebrupture.serial, ebrupture.grp_id, rup.code,
                    ebrupture.eidx1, ebrupture.eidx2,
                    getattr(ebrupture, 'pmfx', -1),
                    rup.seed, rup.mag, rup.rake, rate, hypo,
@@ -588,7 +594,7 @@ class RuptureSerializer(object):
         pass
 
 
-def get_ruptures_by_grp(dstore, slice_=slice(None), rup_id=None):
+def get_ruptures_by_grp(dstore, slice_=slice(None)):
     """
     Extracts the ruptures of the given grp_id
     """
@@ -599,36 +605,89 @@ def get_ruptures_by_grp(dstore, slice_=slice(None), rup_id=None):
     with mock.patch(
             'openquake.hazardlib.geo.surface.PlanarSurface.'
             'IMPERFECT_RECTANGLE_TOLERANCE', numpy.inf):
-        return general.groupby(
-            RuptureGetter(dstore, slice_), operator.attrgetter('grp_id'))
+        rgetter = RuptureGetter(dstore, slice_)
+        return general.groupby(rgetter, operator.attrgetter('grp_id'))
+
+
+def get_maxloss_rupture(dstore, loss_type):
+    """
+    :param dstore: a DataStore instance
+    :param loss_type: a loss type string
+    :returns:
+        EBRupture instance corresponding to the maximum loss for the
+        given loss type
+    """
+    lti = dstore['oqparam'].lti[loss_type]
+    ridx = dstore.get_attr('rup_loss_table', 'ridx')[lti]
+    [ebr] = RuptureGetter(dstore, slice(ridx, ridx + 1))
+    return ebr
 
 
 class RuptureGetter(object):
     """
     Iterable over ruptures.
 
-    :param dstore: a DataStore instance
-    :param slice_: a slice of ruptures (default: all)
-    :param grp_id: the group ID of the ruptures (default: all)
-    :param rup_id: a specific rupture (default: all)
+    :param dstore:
+        a DataStore instance with a dataset names `ruptures`
+    :param mask:
+        which ruptures to read; it can be:
+        - None: read all ruptures
+        - a slice
+        - a boolean mask
+        - a list of integers
+    :param grp_id:
+        the group ID of the ruptures, if they are homogeneous, or None
     """
-    def __init__(self, dstore, slice_=slice(None), grp_id=None, rup_id=None):
+    @classmethod
+    def from_(cls, dstore):
+        """
+        :returns: a dictionary grp_id -> RuptureGetter instance
+        """
+        array = dstore['ruptures'].value
+        grp_ids = numpy.unique(array['grp_id'])
+        return {grp_id: cls(dstore, array['grp_id'] == grp_id, grp_id)
+                for grp_id in grp_ids}
+
+    def __init__(self, dstore, mask=None, grp_id=None):
         self.dstore = dstore
-        self.slice = slice_
+        self.mask = slice(None) if mask is None else mask
         self.grp_id = grp_id
-        self.rup_id = rup_id
+
+    def split(self, block_size):
+        """
+        Split a RuptureGetter in multiple getters, each one containing a block
+        of ruptures.
+
+        :param block_size:
+            maximum length of the rupture blocks
+        :returns:
+            `RuptureGetters` containing `block_size` ruptures and with
+            an attribute `.n_events` counting the total number of events
+        """
+        getters = []
+        indices, = self.mask.nonzero()
+        for block in general.block_splitter(indices, block_size):
+            idxs = list(block)  # not numpy.int_(block)!
+            rgetter = self.__class__(self.dstore, idxs, self.grp_id)
+            rup = self.dstore['ruptures'][idxs]
+            # use int below, otherwise n_events would be a numpy.uint64
+            rgetter.n_events = int((rup['eidx2'] - rup['eidx1']).sum())
+            getters.append(rgetter)
+        return getters
 
     def __iter__(self):
         self.dstore.open()  # if needed
         oq = self.dstore['oqparam']
         grp_trt = self.dstore['csm_info'].grp_trt()
-        recs = self.dstore['ruptures'][self.slice]
-        for rec in recs:
-            if self.rup_id is not None and self.rup_id != rec['serial']:
-                continue
+        ruptures = self.dstore['ruptures'][self.mask]
+        # NB: ruptures.sort(order='serial') causes sometimes a SystemError:
+        # <ufunc 'greater'> returned a result with an error set
+        # this is way I am sorting with Python and not with numpy below
+        data = sorted((ser, idx) for idx, ser in enumerate(ruptures['serial']))
+        for serial, ridx in data:
+            rec = ruptures[ridx]
             evs = self.dstore['events'][rec['eidx1']:rec['eidx2']]
-            grp_id = evs['grp_id'][0]
-            if self.grp_id is not None and self.grp_id != grp_id:
+            if self.grp_id is not None and self.grp_id != rec['grp_id']:
                 continue
             mesh = rec['points'].reshape(rec['sx'], rec['sy'], rec['sz'])
             rupture_cls, surface_cls, source_cls = BaseRupture.types[
@@ -646,7 +705,7 @@ class RuptureGetter(object):
             rupture.seed = rec['seed']
             rupture.hypocenter = geo.Point(*rec['hypo'])
             rupture.occurrence_rate = rec['occurrence_rate']
-            rupture.tectonic_region_type = grp_trt[grp_id]
+            rupture.tectonic_region_type = grp_trt[rec['grp_id']]
             pmfx = rec['pmfx']
             if pmfx != -1:
                 rupture.pmf = self.dstore['pmfs'][pmfx]
@@ -662,8 +721,20 @@ class RuptureGetter(object):
                 m = mesh[0]
                 rupture.surface.mesh = RectangularMesh(
                     m['lon'], m['lat'], m['depth'])
-            ebr = EBRupture(rupture, (), evs, rec['serial'])
+            ebr = EBRupture(rupture, (), evs, serial)
             ebr.eidx1 = rec['eidx1']
             ebr.eidx2 = rec['eidx2']
             # not implemented: rupture_slip_direction
             yield ebr
+
+    def __len__(self):
+        if hasattr(self.mask, 'start'):  # is a slice
+            if self.mask.start is None and self.mask.stop is None:
+                return len(self.dstore['ruptures'])
+            else:
+                return self.mask.stop - self.mask.start
+        elif isinstance(self.mask, list):
+            # NB: h5py wants lists, not arrays of indices
+            return len(self.mask)
+        else:  # is a boolean mask
+            return self.mask.sum()

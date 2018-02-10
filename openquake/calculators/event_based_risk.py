@@ -41,6 +41,34 @@ getweight = operator.attrgetter('weight')
 indices_dt = numpy.dtype([('start', U32), ('stop', U32)])
 
 
+def build_rup_loss_table(dstore):
+    """
+    Save the total losses by rupture.
+    """
+    oq = dstore['oqparam']
+    loss_dt = oq.loss_dt()
+    events = dstore['events']
+    rup_by_eid = dict(zip(events['eid'], events['rup_id']))
+    losses_by_rup = {}
+    for rec in dstore['agg_loss_table'].value:  # .value is essential for speed
+        rupid = rup_by_eid[rec['eid']]
+        if rupid in losses_by_rup:
+            losses_by_rup[rupid] += rec['loss']
+        else:
+            losses_by_rup[rupid] = rec['loss']
+    assert losses_by_rup, 'Empty agg_loss_table'
+    serials = dstore['ruptures']['serial']
+    tbl = numpy.zeros(len(serials), oq.loss_dt())
+    for i, serial in enumerate(serials):
+        row = tbl[i]
+        try:
+            for l, lt in enumerate(loss_dt.names):
+                row[lt] = losses_by_rup[serial][l]
+        except KeyError:
+            pass
+    return tbl
+
+
 def event_based_risk(riskinput, riskmodel, param, monitor):
     """
     :param riskinput:
@@ -158,12 +186,10 @@ class EbriskCalculator(base.RiskCalculator):
     # TODO: if the number of source models is larger than concurrent_tasks
     # a different strategy should be used; the one used here is good when
     # there are few source models, so that we cannot parallelize on those
-    def start_tasks(self, sm_id, ruptures_by_grp, sitecol,
-                    assetcol, riskmodel, imtls, trunc_level, correl_model,
-                    min_iml, monitor):
+    def start_tasks(self, sm_id, sitecol, assetcol, riskmodel, imtls,
+                    trunc_level, correl_model, min_iml, monitor):
         """
         :param sm_id: source model ordinal
-        :param ruptures_by_grp: dictionary of ruptures by src_group_id
         :param sitecol: a SiteCollection instance
         :param assetcol: an AssetCollection instance
         :param riskmodel: a RiskModel instance
@@ -174,9 +200,9 @@ class EbriskCalculator(base.RiskCalculator):
         :param monitor: a Monitor instance
         :returns: an IterResult instance
         """
-        csm_info = self.csm_info.get_info(sm_id)
-        grp_ids = sorted(csm_info.get_sm_by_grp())
-        rlzs_assoc = csm_info.get_rlzs_assoc()
+        sm_info = self.csm_info.get_info(sm_id)
+        grp_ids = sorted(sm_info.get_sm_by_grp())
+        rlzs_assoc = sm_info.get_rlzs_assoc()
         # prepare the risk inputs
         allargs = []
         ruptures_per_block = self.oqparam.ruptures_per_block
@@ -186,12 +212,22 @@ class EbriskCalculator(base.RiskCalculator):
             csm_info = self.datastore['csm_info']
         samples_by_grp = csm_info.get_samples_by_grp()
         num_events = 0
+        num_ruptures = {}
         for grp_id in grp_ids:
             rlzs_by_gsim = rlzs_assoc.get_rlzs_by_gsim(grp_id)
             samples = samples_by_grp[grp_id]
-            for rupts in block_splitter(
-                    ruptures_by_grp.get(grp_id, []), ruptures_per_block):
-                n_events = sum(ebr.multiplicity for ebr in rupts)
+            ruptures = self.ruptures_by_grp.get(grp_id, [])
+            num_ruptures[grp_id] = len(ruptures)
+            from_parent = hasattr(ruptures, 'split')
+            if from_parent:  # read the ruptures from the parent datastore
+                logging.info('Reading ruptures group #%d', grp_id)
+                with self.monitor('reading ruptures', measuremem=True):
+                    blocks = ruptures.split(ruptures_per_block)
+            else:  # the ruptures are already in memory
+                blocks = block_splitter(ruptures, ruptures_per_block)
+            for rupts in blocks:
+                n_events = (rupts.n_events if from_parent
+                            else sum(ebr.multiplicity for ebr in rupts))
                 eps = self.get_eps(self.start, self.start + n_events)
                 num_events += n_events
                 self.start += n_events
@@ -204,16 +240,17 @@ class EbriskCalculator(base.RiskCalculator):
 
         self.vals = self.assetcol.values()
         taskname = '%s#%d' % (event_based_risk.__name__, sm_id + 1)
+        if self.datastore.parent:  # avoid hdf5 fork issues
+            self.datastore.parent.close()
         ires = parallel.Starmap(
             event_based_risk, allargs, name=taskname).submit_all()
-        ires.num_ruptures = {
-            sg_id: len(rupts) for sg_id, rupts in ruptures_by_grp.items()}
+        ires.num_ruptures = num_ruptures
         ires.num_events = num_events
         ires.num_rlzs = len(rlzs_assoc.realizations)
         ires.sm_id = sm_id
         return ires
 
-    def gen_args(self, ruptures_by_grp):
+    def gen_args(self):
         """
         Yield the arguments required by build_ruptures, i.e. the
         source models, the asset collection, the riskmodel and others.
@@ -239,7 +276,7 @@ class EbriskCalculator(base.RiskCalculator):
                 maximum_distance=oq.maximum_distance,
                 samples=sm.samples,
                 seed=self.oqparam.random_seed)
-            yield (sm.ordinal, ruptures_by_grp, self.sitecol.complete,
+            yield (sm.ordinal, self.sitecol.complete,
                    param, self.riskmodel, imtls, oq.truncation_level,
                    correl_model, min_iml, mon)
 
@@ -258,23 +295,25 @@ class EbriskCalculator(base.RiskCalculator):
                          'calculation_mode = event_based')
 
         if 'all_loss_ratios' in self.datastore:
+            # event based risk calculation already done, postprocess
             EbrPostCalculator(self).run(close=False)
             return
 
         self.csm_info = self.datastore['csm_info']
-        with self.monitor('reading ruptures', autoflush=True):
-            ruptures_by_grp = (
-                self.precalc.result if self.precalc
-                else calc.get_ruptures_by_grp(self.datastore.parent))
+        if self.precalc:
+            self.ruptures_by_grp = self.precalc.result
             # the ordering of the ruptures is essential for repeatibility
-            for grp in ruptures_by_grp:
-                ruptures_by_grp[grp].sort(key=operator.attrgetter('serial'))
+            for grp in self.ruptures_by_grp:
+                self.ruptures_by_grp[grp].sort(
+                    key=operator.attrgetter('serial'))
+        else:  # there is a parent calculation
+            self.ruptures_by_grp = calc.RuptureGetter.from_(
+                self.datastore.parent)
         num_rlzs = 0
         allres = []
         source_models = self.csm_info.source_models
         self.sm_by_grp = self.csm_info.get_sm_by_grp()
-        num_events = sum(ebr.multiplicity for grp in ruptures_by_grp
-                         for ebr in ruptures_by_grp[grp])
+        num_events = len(self.datastore['events'])
         self.get_eps = riskinput.make_epsilon_getter(
             len(self.assetcol), num_events,
             self.oqparam.asset_correlation,
@@ -282,7 +321,7 @@ class EbriskCalculator(base.RiskCalculator):
             self.oqparam.ignore_covs or not self.riskmodel.covs)
         self.assets_by_site = self.assetcol.assets_by_site()
         self.start = 0
-        for i, args in enumerate(self.gen_args(ruptures_by_grp)):
+        for i, args in enumerate(self.gen_args()):
             ires = self.start_tasks(*args)
             allres.append(ires)
             ires.rlz_slice = slice(num_rlzs, num_rlzs + ires.num_rlzs)
@@ -301,7 +340,6 @@ class EbriskCalculator(base.RiskCalculator):
         oq = self.oqparam
         self.R = num_rlzs
         self.A = len(self.assetcol)
-        self.tagmask = self.assetcol.tagmask()  # shape (A, T)
         if oq.asset_loss_table:
             # save all_loss_ratios
             self.alr_nbytes = 0
@@ -325,6 +363,8 @@ class EbriskCalculator(base.RiskCalculator):
             logging.debug(
                 'Saving results for source model #%d, realizations %d:%d',
                 res.sm_id + 1, start, stop)
+            if hasattr(res, 'eff_ruptures'):  # for UCERF
+                self.eff_ruptures += res.eff_ruptures
             if hasattr(res, 'ruptures_by_grp'):  # for UCERF
                 save_ruptures(self, res.ruptures_by_grp)
             elif hasattr(res, 'events_by_grp'):  # for UCERF
@@ -413,6 +453,7 @@ class EbriskCalculator(base.RiskCalculator):
         """
         Build aggregate loss curves and run EbrPostCalculator
         """
+        dstore = self.datastore
         self.before_export()  # set 'realizations'
         oq = self.oqparam
         eff_time = oq.investigation_time * oq.ses_per_logic_tree_path
@@ -420,12 +461,17 @@ class EbriskCalculator(base.RiskCalculator):
             logging.warn('eff_time=%s is too small to compute agg_curves',
                          eff_time)
             return
-        b = get_loss_builder(self.datastore)
-        alt = self.datastore['agg_loss_table']
+        b = get_loss_builder(dstore)
+        if 'ruptures' in dstore:
+            logging.info('Building rup_loss_table')
+            with self.monitor('building rup_loss_table', measuremem=True):
+                dstore['rup_loss_table'] = rlt = build_rup_loss_table(dstore)
+                ridx = [rlt[lt].argmax() for lt in oq.loss_dt().names]
+                dstore.set_attrs('rup_loss_table', ridx=ridx)
         stats = oq.risk_stats()
         logging.info('Building aggregate loss curves')
         with self.monitor('building agg_curves', measuremem=True):
-            array, array_stats = b.build(alt, stats)
+            array, array_stats = b.build(dstore['agg_loss_table'].value, stats)
         self.datastore['agg_curves-rlzs'] = array
         units = self.assetcol.units(loss_types=array.dtype.names)
         self.datastore.set_attrs(
@@ -531,8 +577,8 @@ class EbrPostCalculator(base.RiskCalculator):
                     'curves-stats', return_periods=builder.return_periods,
                     stats=[encode(name) for (name, func) in stats])
             mon = self.monitor('loss maps')
-            lazy = (self.can_read_parent() and 'all_loss_ratios'
-                    in self.datastore.parent)
+            lazy = ('all_loss_ratios' in self.datastore.parent
+                    and self.can_read_parent())
             logging.info('Instantiating LossRatiosGetters')
             with self.monitor('building lrgetters', measuremem=True,
                               autoflush=True):

@@ -712,7 +712,8 @@ def compute_ruptures(sources, src_filter, gsims, param, monitor):
                         r_sites, rrup = idist.get_closest(sitecol, rup)
                     except FarAwayRupture:
                         continue
-                    indices = r_sites.indices
+                    indices = (numpy.arange(len(r_sites)) if r_sites.indices
+                               is None else r_sites.indices)
                     events = []
                     for _ in range(n_occ):
                         events.append((0, src.src_group_id, ses_idx, sample))
@@ -845,6 +846,7 @@ def compute_losses(ssm, src_filter, param, riskmodel,
     start = res.sm_id * num_rlzs
     res.rlz_slice = slice(start, start + num_rlzs)
     res.events_by_grp = ruptures_by_grp.events_by_grp
+    res.eff_ruptures = ruptures_by_grp.eff_ruptures
     return res
 
 
@@ -878,10 +880,12 @@ class UCERFRiskCalculator(EbriskCalculator):
                               ('loss', (F32, (self.L, self.I)))])
         monitor = self.monitor('compute_losses')
         for sm in self.csm.source_models:
+            if sm.samples > 1:
+                logging.warn('Sampling in ucerf_risk is untested')
             ssm = self.csm.get_model(sm.ordinal)
             for ses_idx in range(1, oq.ses_per_logic_tree_path + 1):
                 param = dict(ses_seeds=[(ses_idx, oq.ses_seed + ses_idx)],
-                             samples=1, assetcol=self.assetcol,
+                             samples=sm.samples, assetcol=self.assetcol,
                              save_ruptures=False,
                              ses_ratio=oq.ses_ratio,
                              avg_losses=oq.avg_losses,
@@ -897,5 +901,8 @@ class UCERFRiskCalculator(EbriskCalculator):
         self.grp_trt = self.csm_info.grp_trt()
         res = parallel.Starmap(compute_losses, self.gen_args()).submit_all()
         self.vals = self.assetcol.values()
+        self.eff_ruptures = AccumDict(accum=0)
         num_events = self.save_results(res, num_rlzs)
+        self.csm.info.update_eff_ruptures(self.eff_ruptures)
+        self.datastore['csm_info'] = self.csm.info
         return num_events

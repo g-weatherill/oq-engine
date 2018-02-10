@@ -38,7 +38,7 @@ def dist_by_asset(data, multi_stat_dt):
     for l, lt in enumerate(multi_stat_dt.names):
         out_lt = out[lt]
         for n, r in itertools.product(range(N), range(R)):
-            out_lt[n, r] = data[n, r, l]
+            out_lt[n, r] = tuple(data[n, r, l])  # (mean, stddev)
     return out
 
 
@@ -81,7 +81,7 @@ def scenario_damage(riskinput, riskmodel, param, monitor):
             for a, fraction in enumerate(damages):
                 asset = outputs.assets[a]
                 damages = fraction * asset.number
-                t = asset.tagmask
+                t = asset.tagmask(param['tags'])
                 result['d_tag'][t, r, l] += damages  # shape (E, D)
                 if c_model:  # compute consequences
                     means = [par[0] for par in c_model[asset.taxonomy].params]

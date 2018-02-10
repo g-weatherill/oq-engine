@@ -51,8 +51,8 @@ class GmfComputer(object):
     :param rupture:
         Rupture to calculate ground motion fields radiated from.
 
-    :param :class:`openquake.hazardlib.site.SiteCollection` sites:
-        Sites of interest to calculate GMFs.
+    :param :class:`openquake.hazardlib.site.SiteCollection` sitecol:
+        a complete SiteCollection
 
     :param imts:
         a sorted list of Intensity Measure Type strings
@@ -77,9 +77,9 @@ class GmfComputer(object):
     # a matrix of size (I, N, E) is returned, where I is the number of
     # IMTs, N the number of affected sites and E the number of events. The
     # seed is extracted from the underlying rupture.
-    def __init__(self, rupture, sites, imts, cmaker,
+    def __init__(self, rupture, sitecol, imts, cmaker,
                  truncation_level=None, correlation_model=None):
-        if len(sites) == 0:
+        if len(sitecol) == 0:
             raise ValueError('No sites')
         elif len(imts) == 0:
             raise ValueError('No IMTs')
@@ -97,8 +97,10 @@ class GmfComputer(object):
         try:
             self.ctx = rupture.ctx
         except AttributeError:
-            self.ctx = cmaker.make_contexts(sites, rupture)
-        self.sites = self.ctx[0].sites
+            self.ctx = cmaker.make_contexts(sitecol, rupture)
+        self.sids = self.ctx[0].sids
+        if correlation_model:  # store the filtered sitecol
+            self.sites = sitecol.filtered(self.sids, sitecol.array)
 
     def compute(self, gsim, num_events, seed=None):
         """
@@ -114,7 +116,7 @@ class GmfComputer(object):
         if seed is not None:
             numpy.random.seed(seed)
         result = numpy.zeros(
-            (len(self.imts), len(self.sites), num_events), numpy.float32)
+            (len(self.imts), len(self.sids), num_events), numpy.float32)
         for imti, imt in enumerate(self.imts):
             result[imti] = self._compute(None, gsim, num_events, imt)
         return result
@@ -161,7 +163,7 @@ class GmfComputer(object):
             mean = mean.reshape(mean.shape + (1, ))
 
             total_residual = stddev_total * distribution.rvs(
-                size=(len(self.sites), num_events))
+                size=(len(self.sids), num_events))
             gmf = gsim.to_imt_unit_values(mean + total_residual)
         else:
             mean, [stddev_inter, stddev_intra] = gsim.get_mean_and_stddevs(
@@ -170,9 +172,8 @@ class GmfComputer(object):
             stddev_intra = stddev_intra.reshape(stddev_intra.shape + (1, ))
             stddev_inter = stddev_inter.reshape(stddev_inter.shape + (1, ))
             mean = mean.reshape(mean.shape + (1, ))
-
             intra_residual = stddev_intra * distribution.rvs(
-                size=(len(self.sites), num_events))
+                size=(len(self.sids), num_events))
 
             if self.correlation_model is not None:
                 ir = self.correlation_model.apply_correlation(
