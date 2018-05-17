@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 #
-# Copyright (C) 2015-2017 GEM Foundation
+# Copyright (C) 2015-2018 GEM Foundation
 #
 # OpenQuake is free software: you can redistribute it and/or modify it
 # under the terms of the GNU Affero General Public License as published
@@ -26,7 +26,7 @@ from openquake.baselib import parallel
 from openquake.hazardlib.probability_map import ProbabilityMap
 from openquake.hazardlib.calc.hazard_curve import classical
 from openquake.hazardlib.calc.filters import SourceFilter
-from openquake.hazardlib.gsim.base import ContextMaker
+from openquake.hazardlib.contexts import ContextMaker
 from openquake.hazardlib import valid
 from openquake.commonlib import source, readinput, util
 from openquake.hazardlib.sourceconverter import SourceConverter
@@ -70,6 +70,8 @@ def convert_UCERFSource(self, node):
         msr=valid.SCALEREL[~node.magScaleRel](),
         mesh_spacing=self.rupture_mesh_spacing,
         trt=node["tectonicRegion"])
+
+
 SourceConverter.convert_UCERFSource = convert_UCERFSource
 
 
@@ -141,13 +143,13 @@ class UcerfPSHACalculator(PSHACalculator):
         parse the logic tree and source model input
         """
         logging.warn('%s is still experimental', self.__class__.__name__)
-        self.sitecol = readinput.get_site_collection(self.oqparam)
+        sitecol = readinput.get_site_collection(self.oqparam)
+        self.datastore['sitecol'] = self.sitecol = sitecol
         self.csm = get_composite_source_model(self.oqparam)
         self.gsims_by_grp = {grp.id: self.csm.info.get_gsims(grp.id)
                              for sm in self.csm.source_models
                              for grp in sm.src_groups}
         self.rup_data = {}
-        self.split_time = {src.source_id: 0 for src in self.csm.get_sources()}
 
     def execute(self):
         """
@@ -165,7 +167,8 @@ class UcerfPSHACalculator(PSHACalculator):
         acc.calc_times = {}
         acc.eff_ruptures = AccumDict()  # grp_id -> eff_ruptures
         acc.bb_dict = {}  # just for API compatibility
-        param = dict(imtls=oq.imtls, truncation_level=oq.truncation_level)
+        param = dict(imtls=oq.imtls, truncation_level=oq.truncation_level,
+                     filter_distance=oq.filter_distance)
         for sm in self.csm.source_models:  # one branch at the time
             grp_id = sm.ordinal
             gsims = self.gsims_by_grp[grp_id]
