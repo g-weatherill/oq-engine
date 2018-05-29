@@ -98,7 +98,7 @@ def extract_calc_id_datadir(hdf5path, datadir=None):
         return get_last_calc_id(datadir) + 1, datadir
     try:
         calc_id = int(hdf5path)
-    except:
+    except ValueError:
         datadir = os.path.dirname(hdf5path)
         mo = re.match('calc_(\d+)\.hdf5', os.path.basename(hdf5path))
         if mo is None:
@@ -196,6 +196,12 @@ class DataStore(collections.MutableMapping):
         Set the export directory
         """
         self._export_dir = value
+
+    def hdf5cache(self):
+        """
+        :returns: the path to the .hdf5 cache file associated to the calc_id
+        """
+        return os.path.join(self.datadir, 'cache_%d.hdf5' % self.calc_id)
 
     def getitem(self, name):
         """

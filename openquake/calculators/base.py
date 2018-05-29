@@ -15,7 +15,6 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with OpenQuake. If not, see <http://www.gnu.org/licenses/>.
-from __future__ import division
 import os
 import sys
 import abc
@@ -32,12 +31,10 @@ import numpy
 from openquake.baselib import (
     config, general, hdf5, datastore, __version__ as engine_version)
 from openquake.baselib.performance import Monitor
-from openquake.hazardlib.calc.filters import (
-    BaseFilter, SourceFilter, RtreeFilter, rtree)
+from openquake.hazardlib.calc.filters import SourceFilter, RtreeFilter, rtree
 from openquake.risklib import riskinput, riskmodels
 from openquake.commonlib import readinput, source, calc, writers
 from openquake.baselib.parallel import Starmap
-from openquake.baselib.python3compat import with_metaclass
 from openquake.hazardlib.shakemap import get_sitecol_shakemap, to_gmfs
 from openquake.calculators.export import export as exp
 from openquake.calculators.getters import GmfDataGetter, PmapGetter
@@ -111,7 +108,7 @@ def check_precalc_consistency(calc_mode, precalc_mode):
             (calc_mode, ok_mode, precalc_mode))
 
 
-class BaseCalculator(with_metaclass(abc.ABCMeta)):
+class BaseCalculator(metaclass=abc.ABCMeta):
     """
     Abstract base class for all calculators.
 
@@ -123,9 +120,11 @@ class BaseCalculator(with_metaclass(abc.ABCMeta)):
     pre_calculator = None  # to be overridden
     is_stochastic = False  # True for scenario and event based calculators
 
-    def __init__(self, oqparam, monitor=Monitor(), calc_id=None):
-        self._monitor = monitor
+    def __init__(self, oqparam, calc_id=None):
         self.datastore = datastore.DataStore(calc_id)
+        self._monitor = Monitor(
+            '%s.run' % self.__class__.__name__, measuremem=True)
+        self._monitor.hdf5path = self.datastore.hdf5path
         self.oqparam = oqparam
 
     def monitor(self, operation, **kw):
@@ -165,50 +164,52 @@ class BaseCalculator(with_metaclass(abc.ABCMeta)):
         Run the calculation and return the exported outputs.
         """
         global logversion
-        self.close = close
-        self.set_log_format()
-        if logversion:  # make sure this is logged only once
-            logging.info('Running %s', self.oqparam.inputs['job_ini'])
-            logging.info('Using engine version %s', engine_version)
-            logversion = False
-        if concurrent_tasks is None:  # use the job.ini parameter
-            ct = self.oqparam.concurrent_tasks
-        else:  # used the parameter passed in the command-line
-            ct = concurrent_tasks
-        if ct == 0:  # disable distribution temporarily
-            oq_distribute = os.environ.get('OQ_DISTRIBUTE')
-            os.environ['OQ_DISTRIBUTE'] = 'no'
-        if ct != self.oqparam.concurrent_tasks:
-            # save the used concurrent_tasks
-            self.oqparam.concurrent_tasks = ct
-        self.save_params(**kw)
-        Starmap.init()
-        try:
-            if pre_execute:
-                self.pre_execute()
-            self.result = self.execute()
-            if self.result is not None:
-                self.post_execute(self.result)
-            self.before_export()
-            self.export(kw.get('exports', ''))
-        except Exception:
-            if kw.get('pdb'):  # post-mortem debug
-                tb = sys.exc_info()[2]
-                traceback.print_tb(tb)
-                pdb.post_mortem(tb)
-            else:
-                logging.critical('', exc_info=True)
-                raise
-        finally:
-            # cleanup globals
-            if ct == 0:  # restore OQ_DISTRIBUTE
-                if oq_distribute is None:  # was not set
-                    del os.environ['OQ_DISTRIBUTE']
+        with self._monitor:
+            self.close = close
+            self.set_log_format()
+            if logversion:  # make sure this is logged only once
+                logging.info('Running %s', self.oqparam.inputs['job_ini'])
+                logging.info('Using engine version %s', engine_version)
+                logversion = False
+            if concurrent_tasks is None:  # use the job.ini parameter
+                ct = self.oqparam.concurrent_tasks
+            else:  # used the parameter passed in the command-line
+                ct = concurrent_tasks
+            if ct == 0:  # disable distribution temporarily
+                oq_distribute = os.environ.get('OQ_DISTRIBUTE')
+                os.environ['OQ_DISTRIBUTE'] = 'no'
+            if ct != self.oqparam.concurrent_tasks:
+                # save the used concurrent_tasks
+                self.oqparam.concurrent_tasks = ct
+            self.save_params(**kw)
+            Starmap.init()
+            try:
+                if pre_execute:
+                    self.pre_execute()
+                self.result = self.execute()
+                if self.result is not None:
+                    self.post_execute(self.result)
+                self.before_export()
+                self.export(kw.get('exports', ''))
+            except Exception:
+                if kw.get('pdb'):  # post-mortem debug
+                    tb = sys.exc_info()[2]
+                    traceback.print_tb(tb)
+                    pdb.post_mortem(tb)
                 else:
-                    os.environ['OQ_DISTRIBUTE'] = oq_distribute
-            readinput.pmap = None
-            readinput.exposure = None
-            Starmap.shutdown()
+                    logging.critical('', exc_info=True)
+                    raise
+            finally:
+                # cleanup globals
+                if ct == 0:  # restore OQ_DISTRIBUTE
+                    if oq_distribute is None:  # was not set
+                        del os.environ['OQ_DISTRIBUTE']
+                    else:
+                        os.environ['OQ_DISTRIBUTE'] = oq_distribute
+                readinput.pmap = None
+                readinput.exposure = None
+                Starmap.shutdown()
+        self._monitor.flush()
         return getattr(self, 'exported', {})
 
     def core_task(*args):
@@ -324,15 +325,18 @@ class HazardCalculator(BaseCalculator):
         :returns: (filtered CompositeSourceModel, SourceFilter)
         """
         oq = self.oqparam
-        src_filter = SourceFilter(self.sitecol.complete, oq.maximum_distance)
-        monitor = self.monitor('prefiltering')
+        mon = self.monitor('prefilter')
+        self.hdf5cache = self.datastore.hdf5cache()
+        src_filter = SourceFilter(self.sitecol.complete, oq.maximum_distance,
+                                  self.hdf5cache)
         if (oq.prefilter_sources == 'numpy' or rtree is None):
-            csm = self.csm.filter(src_filter, monitor)
+            csm = self.csm.filter(src_filter, mon)
         elif oq.prefilter_sources == 'rtree':
-            prefilter = RtreeFilter(self.sitecol.complete, oq.maximum_distance)
-            csm = self.csm.filter(prefilter, monitor)
-        else:
-            csm = self.csm.filter(BaseFilter(), monitor)
+            prefilter = RtreeFilter(self.sitecol.complete, oq.maximum_distance,
+                                    self.hdf5cache)
+            csm = self.csm.filter(prefilter, mon)
+        else:  # prefilter_sources='no'
+            csm = self.csm.filter(SourceFilter(None, {}), mon)
         return csm, src_filter
 
     def can_read_parent(self):
@@ -344,15 +348,17 @@ class HazardCalculator(BaseCalculator):
         read_access = (
             config.distribution.oq_distribute in ('no', 'processpool') or
             config.directory.shared_dir)
-        if (self.oqparam.hazard_calculation_id and read_access
-                and 'gmf_data' not in self.datastore.hdf5):
+        hdf5cache = getattr(self.precalc, 'hdf5cache', None)
+        if hdf5cache and read_access:
+            return hdf5cache
+        elif (self.oqparam.hazard_calculation_id and read_access and
+              'gmf_data' not in self.datastore.hdf5):
             self.datastore.parent.close()  # make sure it is closed
             return self.datastore.parent
 
     def compute_previous(self):
         precalc = calculators[self.pre_calculator](
-            self.oqparam, self.monitor('precalculator'),
-            self.datastore.calc_id)
+            self.oqparam, self.datastore.calc_id)
         precalc.run(close=False)
         if 'scenario' not in self.oqparam.calculation_mode:
             self.csm = precalc.csm
@@ -506,6 +512,7 @@ class HazardCalculator(BaseCalculator):
         site collection, possibly extracted from the exposure.
         """
         oq = self.oqparam
+        self.load_riskmodel()  # must be called first
         with self.monitor('reading site collection', autoflush=True):
             if oq.hazard_calculation_id:
                 with datastore.read(oq.hazard_calculation_id) as dstore:
@@ -520,29 +527,31 @@ class HazardCalculator(BaseCalculator):
                     haz_sitecol.make_complete()
         oq_hazard = (self.datastore.parent['oqparam']
                      if self.datastore.parent else None)
-        if oq.shakemap_id or 'shakemap' in oq.inputs:
-            self.read_shakemap()
         if 'exposure' in oq.inputs:
             self.read_exposure(haz_sitecol)
-            self.load_riskmodel()  # must be called *after* read_exposure
             self.datastore['assetcol'] = self.assetcol
         elif 'assetcol' in self.datastore.parent:
             assetcol = self.datastore.parent['assetcol']
             if oq.region:
                 region = wkt.loads(self.oqparam.region)
                 self.sitecol = haz_sitecol.within(region)
-            if hasattr(self, 'sitecol') and general.not_equal(
+            if oq.shakemap_id or 'shakemap' in oq.inputs:
+                self.sitecol, self.assetcol = self.read_shakemap(
+                    haz_sitecol, assetcol)
+                self.datastore['assetcol'] = self.assetcol
+                logging.info('Extracted %d/%d assets',
+                             len(self.assetcol), len(assetcol))
+            elif hasattr(self, 'sitecol') and general.not_equal(
                     self.sitecol.sids, haz_sitecol.sids):
-                self.assetcol = assetcol.reduce(self.sitecol.sids)
+                self.assetcol = assetcol.reduce(self.sitecol)
                 self.datastore['assetcol'] = self.assetcol
                 logging.info('Extracted %d/%d assets',
                              len(self.assetcol), len(assetcol))
             else:
                 self.assetcol = assetcol
-            self.load_riskmodel()
         else:  # no exposure
-            self.load_riskmodel()
             self.sitecol = haz_sitecol
+            logging.info('Read %d hazard sites', len(self.sitecol))
 
         if oq_hazard:
             parent = self.datastore.parent
@@ -595,7 +604,9 @@ class HazardCalculator(BaseCalculator):
             for i, row in enumerate(rows):
                 for name in array.dtype.names:
                     value = getattr(row, name)
-                    if name == 'grp_id' and isinstance(value, list):
+                    if name == 'num_sites':
+                        value /= (row.num_split or 1)
+                    elif name == 'grp_id' and isinstance(value, list):
                         # same ID sources; store only the first
                         value = value[0]
                     array[i][name] = value
@@ -646,7 +657,7 @@ class RiskCalculator(HazardCalculator):
             self._R = self.datastore['csm_info'].get_num_rlzs()
             return self._R
 
-    def read_shakemap(self):
+    def read_shakemap(self, haz_sitecol, assetcol):
         """
         Enabled only if there is a shakemap_id parameter in the job.ini.
         Download, unzip, parse USGS shakemap files and build a corresponding
@@ -655,26 +666,25 @@ class RiskCalculator(HazardCalculator):
         """
         oq = self.oqparam
         E = oq.number_of_ground_motion_fields
-        haz_sitecol = self.datastore.parent['sitecol']
 
         logging.info('Getting/reducing shakemap')
         with self.monitor('getting/reducing shakemap'):
             smap = oq.shakemap_id if oq.shakemap_id else numpy.load(
                 oq.inputs['shakemap'])
-            self.sitecol, shakemap = get_sitecol_shakemap(
+            sitecol, shakemap = get_sitecol_shakemap(
                 smap, haz_sitecol, oq.asset_hazard_distance or
                 oq.region_grid_spacing)
+            assetcol = assetcol.reduce_also(sitecol)
 
         logging.info('Building GMFs')
         with self.monitor('building/saving GMFs'):
             gmfs = to_gmfs(shakemap, oq.cross_correlation, oq.site_effects,
-                           oq.truncation_level, E, oq.random_seed)
-            tot_sites = self.datastore.get_attr('assetcol', 'tot_sites')
-            save_gmf_data(self.datastore, self.sitecol, gmfs,
-                          tot_sites=tot_sites)
+                           oq.truncation_level, E, oq.random_seed, oq.imtls)
+            save_gmf_data(self.datastore, sitecol, gmfs)
             events = numpy.zeros(E, readinput.stored_event_dt)
             events['eid'] = numpy.arange(E, dtype=U64)
             self.datastore['events'] = events
+        return sitecol, assetcol
 
     def make_eps(self, num_ruptures):
         """
@@ -743,7 +753,7 @@ class RiskCalculator(HazardCalculator):
                         reduced_eps[ass.ordinal] = eps[ass.ordinal]
             # build the riskinputs
             if kind == 'poe':  # hcurves, shape (R, N)
-                getter = PmapGetter(dstore, sids, self.rlzs_assoc)
+                getter = PmapGetter(dstore, self.rlzs_assoc, sids)
                 getter.num_rlzs = self.R
             else:  # gmf
                 getter = GmfDataGetter(dstore, sids, self.R, num_events)
@@ -798,18 +808,14 @@ def save_gmdata(calc, n_rlzs):
     :param n_rlzs: the total number of realizations
     """
     n_sites = len(calc.sitecol)
-    dtlist = ([(imt, F32) for imt in calc.oqparam.imtls] +
-              [('events', U32), ('nbytes', U32)])
+    dtlist = ([(imt, F32) for imt in calc.oqparam.imtls] + [('events', U32)])
     array = numpy.zeros(n_rlzs, dtlist)
     for rlzi in sorted(calc.gmdata):
-        data = calc.gmdata[rlzi]  # (imts, events, nbytes)
-        events = data[-2]
-        nbytes = data[-1]
-        gmv = data[:-2] / events / n_sites
-        array[rlzi] = tuple(gmv) + (events, nbytes)
+        data = calc.gmdata[rlzi]  # (imts, events)
+        events = data[-1]
+        gmv = data[:-1] / events / n_sites
+        array[rlzi] = tuple(gmv) + (events,)
     calc.datastore['gmdata'] = array
-    logging.info('Generated %s of GMFs',
-                 general.humansize(array['nbytes'].sum()))
 
 
 def save_gmfs(calculator):
@@ -821,11 +827,12 @@ def save_gmfs(calculator):
     oq = calculator.oqparam
     logging.info('Reading gmfs from file')
     if oq.inputs['gmfs'].endswith('.csv'):
+        # TODO: check if import_gmfs can be removed
         eids, num_rlzs, calculator.gmdata = import_gmfs(
             dstore, oq.inputs['gmfs'], calculator.sitecol.complete.sids)
         save_gmdata(calculator, calculator.R)
     else:  # XML
-        eids, gmfs = readinput.get_gmfs(oq)
+        eids, gmfs = readinput.eids, readinput.gmfs
     E = len(eids)
     calculator.eids = eids
     if hasattr(oq, 'number_of_ground_motion_fields'):
@@ -842,7 +849,7 @@ def save_gmfs(calculator):
         save_gmf_data(dstore, haz_sitecol, gmfs[:, haz_sitecol.sids], eids)
 
 
-def save_gmf_data(dstore, sitecol, gmfs, eids=(), tot_sites=None):
+def save_gmf_data(dstore, sitecol, gmfs, eids=()):
     """
     :param dstore: a :class:`openquake.baselib.datastore.DataStore` instance
     :param sitecol: a :class:`openquake.hazardlib.site.SiteCollection` instance
@@ -853,10 +860,7 @@ def save_gmf_data(dstore, sitecol, gmfs, eids=(), tot_sites=None):
     dstore['gmf_data/data'] = gmfa = get_gmv_data(sitecol.sids, gmfs)
     dic = general.group_array(gmfa, 'sid')
     lst = []
-    if tot_sites is not None:
-        all_sids = numpy.arange(tot_sites, dtype=U32)
-    else:
-        all_sids = sitecol.complete.sids
+    all_sids = sitecol.complete.sids
     for sid in all_sids:
         rows = dic.get(sid, ())
         n = len(rows)
@@ -907,11 +911,10 @@ def import_gmfs(dstore, fname, sids):
 
     # compute gmdata
     dic = general.group_array(array.view(gmf_data_dt), 'rlzi')
-    gmdata = {r: numpy.zeros(n_imts + 2, F32) for r in range(num_rlzs)}
+    gmdata = {r: numpy.zeros(n_imts + 1, F32) for r in range(num_rlzs)}
     for r in dic:
         gmv = dic[r]['gmv']
-        rec = gmdata[r]  # (imt1, ..., imtM, nevents, nbytes)
-        rec[:-2] += gmv.sum(axis=0)
-        rec[-2] += len(gmv)
-        rec[-1] += gmv.nbytes
+        rec = gmdata[r]  # (imt1, ..., imtM, nevents)
+        rec[:-1] += gmv.sum(axis=0)
+        rec[-1] += len(gmv)
     return eids, num_rlzs, gmdata

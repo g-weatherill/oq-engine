@@ -69,7 +69,9 @@ class DisaggregationTestCase(CalculatorTestCase):
                                   fname)
 
         # disaggregation by source group
-        pgetter = getters.PmapGetter(self.calc.datastore)
+        rlzs_assoc = self.calc.datastore['csm_info'].get_rlzs_assoc()
+        pgetter = getters.PmapGetter(self.calc.datastore, rlzs_assoc)
+        pgetter.init()
         pmaps = []
         for grp in sorted(pgetter.dstore['poes']):
             pmaps.append(pgetter.get_mean(grp))
@@ -147,4 +149,4 @@ producing too small PoEs.''')
         self.run_calc(case_master.__file__, 'job1.ini')
         arr = self.calc.datastore[
             'disagg_by_src/iml-0.02-PGA--122.6-38.3'].value
-        numpy.testing.assert_almost_equal(arr, [0.67574366, 0.17803075])
+        numpy.testing.assert_almost_equal(arr, [0.6757448, 0.1780308])

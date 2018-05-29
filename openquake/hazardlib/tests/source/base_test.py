@@ -15,14 +15,11 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 import unittest
 
-import numpy
-
 from openquake.hazardlib import const
 from openquake.hazardlib.mfd import EvenlyDiscretizedMFD
 from openquake.hazardlib.scalerel.peer import PeerMSR
 from openquake.hazardlib.source.base import ParametricSeismicSource
-from openquake.hazardlib.geo import Polygon, Point, RectangularMesh
-from openquake.hazardlib.calc import filters
+from openquake.hazardlib.geo import Polygon, Point
 from openquake.hazardlib.site import Site, SiteCollection
 from openquake.hazardlib.tom import PoissonTOM
 
@@ -65,7 +62,7 @@ class _BaseSeismicSourceTestCase(unittest.TestCase):
 
 class SeismicSourceGetAnnOccRatesTestCase(_BaseSeismicSourceTestCase):
     def setUp(self):
-        super(SeismicSourceGetAnnOccRatesTestCase, self).setUp()
+        super().setUp()
         self.source.mfd = EvenlyDiscretizedMFD(min_mag=3, bin_width=1,
                                                occurrence_rates=[5, 0, 7, 0])
 

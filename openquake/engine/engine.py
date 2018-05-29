@@ -19,23 +19,27 @@
 """Engine: A collection of fundamental functions for initializing and running
 calculations."""
 
+import io
 import os
 import re
 import sys
 import json
+import time
 import signal
+import logging
 import traceback
 import platform
+import numpy
 try:
     from setproctitle import setproctitle
 except ImportError:
     def setproctitle(title):
         "Do nothing"
 from urllib.request import urlopen, Request
-from openquake.baselib.performance import Monitor
 from openquake.baselib.python3compat import decode
 from openquake.baselib import (
     parallel, general, config, datastore, __version__, zeromq as z)
+from openquake.hazardlib import nrml
 from openquake.commonlib.oqvalidation import OqParam
 from openquake.commonlib import readinput
 from openquake.calculators import base, views, export
@@ -45,6 +49,7 @@ OQ_API = 'https://api.openquake.org'
 TERMINATE = config.distribution.terminate_workers_on_revoke
 OQ_DISTRIBUTE = parallel.oq_distribute()
 
+_PID = os.getpid()  # the PID
 _PPID = os.getppid()  # the controlling terminal PID
 
 if OQ_DISTRIBUTE == 'zmq':
@@ -151,6 +156,10 @@ class MasterKilled(KeyboardInterrupt):
     "Exception raised when a job is killed manually"
 
 
+def inhibitSigInt(signum, _stack):
+    logs.LOG.warn('Killing job, please wait')
+
+
 def raiseMasterKilled(signum, _stack):
     """
     When a SIGTERM is received, raise the MasterKilled
@@ -159,8 +168,11 @@ def raiseMasterKilled(signum, _stack):
     :param int signum: the number of the received signal
     :param _stack: the current frame object, ignored
     """
-    msg = 'Received a signal %d' % signum
+    # Disable further CTRL-C to allow tasks revocation when Celery is used
+    if OQ_DISTRIBUTE.startswith('celery'):
+        signal.signal(signal.SIGINT, inhibitSigInt)
 
+    msg = 'Received a signal %d' % signum
     if signum in (signal.SIGTERM, signal.SIGINT):
         msg = 'The openquake master process was killed manually'
 
@@ -189,6 +201,61 @@ try:
         signal.signal(signal.SIGHUP, raiseMasterKilled)
 except ValueError:
     pass
+
+
+def zip(job_ini, archive_zip, oq=None, log=logging.info):
+    """
+    Zip the given job.ini file into the given archive, together with all
+    related files.
+    """
+    if not os.path.exists(job_ini):
+        sys.exit('%s does not exist' % job_ini)
+    if isinstance(archive_zip, str):  # actually it should be path-like
+        if not archive_zip.endswith('.zip'):
+            sys.exit('%s does not end with .zip' % archive_zip)
+        if os.path.exists(archive_zip):
+            sys.exit('%s exists already' % archive_zip)
+    logging.basicConfig(level=logging.INFO)
+    # do not validate to avoid permissions error on the export_dir
+    oq = oq or readinput.get_oqparam(job_ini, validate=False)
+    files = set()
+
+    # collect .hdf5 tables for the GSIMs, if any
+    if 'gsim_logic_tree' in oq.inputs or oq.gsim:
+        gsim_lt = readinput.get_gsim_lt(oq)
+        for gsims in gsim_lt.values.values():
+            for gsim in gsims:
+                table = getattr(gsim, 'GMPE_TABLE', None)
+                if table:
+                    files.add(table)
+
+    # collect exposure.csv, if any
+    exposure_xml = oq.inputs.get('exposure')
+    if exposure_xml:
+        dname = os.path.dirname(exposure_xml)
+        expo = nrml.read(exposure_xml, stop='asset')[0]
+        if not expo.assets:
+            exposure_csv = (~expo.assets).strip()
+            for csv in exposure_csv.split():
+                if csv and os.path.exists(os.path.join(dname, csv)):
+                    files.add(os.path.join(dname, csv))
+
+    # collection .hdf5 UCERF file, if any
+    if oq.calculation_mode.startswith('ucerf_'):
+        sm = nrml.read(oq.inputs['source_model'])
+        fname = sm.sourceModel.UCERFSource['filename']
+        f = os.path.join(os.path.dirname(oq.inputs['source_model']), fname)
+        files.add(os.path.normpath(f))
+
+    # collect all other files
+    for key in oq.inputs:
+        fname = oq.inputs[key]
+        if isinstance(fname, list):
+            for f in fname:
+                files.add(os.path.normpath(f))
+        else:
+            files.add(os.path.normpath(fname))
+    general.zipfiles(files, archive_zip, log=log)
 
 
 def job_from_file(cfg_file, username, hazard_calculation_id=None):
@@ -232,23 +299,36 @@ def run_calc(job_id, oqparam, log_level, log_file, exports,
         A comma-separated string of export types.
     """
     setproctitle('oq-job-%d' % job_id)
-    monitor = Monitor('total runtime', measuremem=True)
     with logs.handle(job_id, log_level, log_file):  # run the job
         if OQ_DISTRIBUTE.startswith(('celery', 'zmq')):
             set_concurrent_tasks_default()
         msg = check_obsolete_version(oqparam.calculation_mode)
         if msg:
             logs.LOG.warn(msg)
-        calc = base.calculators(oqparam, monitor, calc_id=job_id)
-        monitor.hdf5path = calc.datastore.hdf5path
+        calc = base.calculators(oqparam, calc_id=job_id)
         calc.from_engine = True
+        job_zip = oqparam.inputs.get('job_zip')
         tb = 'None\n'
         try:
-            logs.dbcmd('set_status', job_id, 'executing')
-            _do_run_calc(calc, exports, hazard_calculation_id, **kw)
-            duration = monitor.duration
+            if job_zip:  # the input was zipped from the beginning
+                data = open(job_zip, 'rb').read()
+            else:  # zip the input
+                logs.LOG.info('zipping the input files')
+                bio = io.BytesIO()
+                zip(oqparam.inputs['job_ini'], bio, oqparam, logging.debug)
+                data = bio.getvalue()
+            calc.datastore['job_zip'] = numpy.array(data)
+            calc.datastore.set_attrs('job_zip', nbytes=len(data))
+
+            logs.dbcmd('update_job', job_id, {'status': 'executing',
+                                              'pid': _PID})
+            t0 = time.time()
+            calc.run(exports=exports,
+                     hazard_calculation_id=hazard_calculation_id,
+                     close=False, **kw)  # don't close the datastore too soon
+            duration = time.time() - t0
             expose_outputs(calc.datastore)
-            monitor.flush()
+            calc._monitor.flush()
             records = views.performance_view(calc.datastore)
             logs.dbcmd('save_performance', job_id, records)
             calc.datastore.close()
@@ -275,12 +355,6 @@ def run_calc(job_id, oqparam, log_level, log_file, exports,
                 if tb == 'None\n':
                     logs.LOG.error('finalizing', exc_info=True)
     return calc
-
-
-def _do_run_calc(calc, exports, hazard_calculation_id, **kw):
-    with calc._monitor:
-        calc.run(exports=exports, hazard_calculation_id=hazard_calculation_id,
-                 close=False, **kw)  # don't close the datastore too soon
 
 
 def version_triple(tag):
@@ -317,7 +391,7 @@ def check_obsolete_version(calculation_mode='WebUI'):
         tag_name = json.loads(decode(data))['tag_name']
         current = version_triple(__version__)
         latest = version_triple(tag_name)
-    except:  # page not available or wrong version tag
+    except Exception:  # page not available or wrong version tag
         return
     if current < latest:
         return ('Version %s of the engine is available, but you are '

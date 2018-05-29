@@ -23,8 +23,6 @@ in the form of binary tables, and
 :class:`openquake.hazardlib.gsim.gmpe_table.AmplificationTable` for defining
 the corresponding amplification of the IMLs
 """
-
-from __future__ import division
 import os
 from copy import deepcopy
 
@@ -326,7 +324,7 @@ class GMPETable(GMPE):
                         os.path.join(self.GMPE_DIR, gmpe_table))
             else:
                 raise IOError("GMPE Table Not Defined!")
-        super(GMPETable, self).__init__()
+        super().__init__()
         self.imls = None
         self.stddevs = {}
         self.m_w = None
