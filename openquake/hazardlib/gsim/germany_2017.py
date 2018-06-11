@@ -2,6 +2,8 @@
 Germany GMPEs for National PSHA
 """
 import numpy as np
+from scipy.constants import g
+from openquake.hazardlib.imt import PGA, PGV, SA
 from openquake.hazardlib.gsim.akkar_2014 import AkkarEtAlRhyp2014
 from openquake.hazardlib.gsim.bindi_2014 import BindiEtAl2014Rhyp
 from openquake.hazardlib.gsim.cauzzi_2014 import CauzziEtAl2014
@@ -84,15 +86,16 @@ def rhypo_to_rrup(rhypo, mag):
     """
     """
     rrup = rhypo - (0.7108 + 2.496E-6 * (mag ** 7.982))
-    rrup[rrup < 3.0] = 3.0    
+    rrup[rrup < 3.0] = 3.0
+    return rrup
 
 def rhypo_to_rjb(rhypo, mag):
     """
     """
     epsilon = rhypo - (4.853 + 1.347E-6 * (mag ** 8.163))
-    rjb = np.zeros_like(repi)
+    rjb = np.zeros_like(rhypo)
     idx = epsilon >= 3.
-    rjb[idx] = sqrt((epsilon[idx] ** 2.) - 9.0)
+    rjb[idx] = np.sqrt((epsilon[idx] ** 2.) - 9.0)
     rjb[rjb < 0.0] = 0.0
     return rjb
 
@@ -108,7 +111,7 @@ class CauzziEtAl2014Rhypo(CauzziEtAl2014):
         Returns the mean ground motion acceleration and velocity
         """
         # Convert rhypo to rrup
-        rrup = rhypo_to_rrup(dists.rhypo, mag)
+        rrup = rhypo_to_rrup(dists.rhypo, rup.mag)
         mean = (self._get_magnitude_scaling_term(C, rup.mag) +
                 self._get_distance_scaling_term(C, rup.mag, rrup) +
                 self._get_style_of_faulting_term(C, rup.rake) +
