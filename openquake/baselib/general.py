@@ -60,6 +60,7 @@ def cached_property(method):
             self.__dict__[name] = val
         return val
     newmethod.__name__ = method.__name__
+    newmethod.__doc__ = method.__doc__
     return property(newmethod)
 
 
@@ -369,7 +370,10 @@ def removetmp():
     """
     for path in _tmp_paths:
         if os.path.exists(path):  # not removed yet
-            os.remove(path)
+            try:
+                os.remove(path)
+            except PermissionError:
+                pass
 
 
 def git_suffix(fname):
@@ -449,12 +453,7 @@ def import_all(module_or_package):
                 # works at any level of nesting
                 modname = (module_or_package + cwd[n:].replace(os.sep, '.') +
                            '.' + os.path.basename(f[:-3]))
-                try:
-                    importlib.import_module(modname)
-                except Exception as exc:
-                    print('Could not import %s: %s: %s' % (
-                        modname, exc.__class__.__name__, exc),
-                          file=sys.stderr)
+                importlib.import_module(modname)
     return set(sys.modules) - already_imported
 
 
@@ -521,7 +520,7 @@ class CallableDict(collections.OrderedDict):
     in openquake.calculators.export
     """
     def __init__(self, keyfunc=lambda key: key, keymissing=None):
-        super(CallableDict, self).__init__()
+        super().__init__()
         self.keyfunc = keyfunc
         self.keymissing = keymissing
 
@@ -749,6 +748,9 @@ class DictArray(collections.Mapping):
         arr.array = array
         return arr
 
+    def __call__(self, imt):
+        return self.slicedic[imt]
+
     def __getitem__(self, imt):
         return self.array[self.slicedic[imt]]
 
@@ -776,6 +778,15 @@ class DictArray(collections.Mapping):
         self.slicedic, num_levels = _slicedict_n(dt)
         for imt in carray.dtype.names:
             self[imt] = carray[0][imt]
+
+    def __eq__(self, other):
+        arr = self.array == other.array
+        if isinstance(arr, bool):
+            return arr
+        return arr.all()
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
 
     def __repr__(self):
         data = ['%s: %s' % (imt, self[imt]) for imt in self]
@@ -893,9 +904,10 @@ class DeprecationWarning(UserWarning):
     """
 
 
-def deprecated(message):
+@decorator
+def deprecated(func, message='', *args, **kw):
     """
-    Return a decorator to make deprecated functions.
+    A family of decorators to mark deprecated functions.
 
     :param message:
         the message to print the first time the
@@ -910,15 +922,13 @@ def deprecated(message):
     Notice that if the function is called several time, the deprecation
     warning will be displayed only the first time.
     """
-    def _deprecated(func, *args, **kw):
-        msg = '%s.%s has been deprecated. %s' % (
-            func.__module__, func.__name__, message)
-        if not hasattr(func, 'called'):
-            warnings.warn(msg, DeprecationWarning, stacklevel=2)
-            func.called = 0
-        func.called += 1
-        return func(*args, **kw)
-    return decorator(_deprecated)
+    msg = '%s.%s has been deprecated. %s' % (
+        func.__module__, func.__name__, message)
+    if not hasattr(func, 'called'):
+        warnings.warn(msg, DeprecationWarning, stacklevel=2)
+        func.called = 0
+    func.called += 1
+    return func(*args, **kw)
 
 
 def random_filter(objects, reduction_factor, seed=42):
@@ -1038,3 +1048,13 @@ def debug(templ, *args):
     tmp = tempfile.gettempdir()
     with open(os.path.join(tmp, 'debug.txt'), 'a', encoding='utf8') as f:
         f.write(msg + '\n')
+
+
+def warn(msg, *args):
+    """
+    Print a warning on stderr
+    """
+    if not args:
+        sys.stderr.write('WARNING: ' + msg)
+    else:
+        sys.stderr.write('WARNING: ' + msg % args)

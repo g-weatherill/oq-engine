@@ -55,7 +55,7 @@ class GmfEbRiskTestCase(CalculatorTestCase):
         self.assertEqual(len(alt), 3)
         self.assertEqual(set(alt['rlzi']), set([0]))  # single rlzi
         totloss = alt['loss'].sum()
-        aae(totloss, 1.5788584)
+        aae(totloss, 0.46601775)
 
     @attr('qa', 'risk', 'event_based_risk')
     def test_case_3(self):
@@ -111,6 +111,7 @@ class GmfEbRiskTestCase(CalculatorTestCase):
                       concurrent_tasks='0')  # to avoid fork bug
         calc2 = self.calc.datastore  # two files event_based_risk
 
+        check_csm_info(calc0, calc1)  # the csm_info arrays must be equal
         check_csm_info(calc0, calc2)  # the csm_info arrays must be equal
 
         if sys.platform == 'darwin':

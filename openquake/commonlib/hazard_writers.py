@@ -607,8 +607,8 @@ class DisaggXMLWriter(object):
 
         The following are optional, depending on the `imt`:
 
-        * sa_period: Only used with imt = 'SA'.
-        * sa_damping: Only used with imt = 'SA'.
+        * sa_period
+        * sa_damping
     """
 
     #: Maps metadata keywords to XML attribute names for bin edge information
@@ -710,7 +710,7 @@ class UHSXMLWriter(BaseCurveWriter):
     """
 
     def __init__(self, dest, **metadata):
-        super(UHSXMLWriter, self).__init__(dest, **metadata)
+        super().__init__(dest, **metadata)
 
         if self.metadata.get('poe') is None:
             raise ValueError('`poe` keyword arg is required')

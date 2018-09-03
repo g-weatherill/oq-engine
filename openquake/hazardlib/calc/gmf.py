@@ -25,6 +25,7 @@ import scipy.stats
 
 from openquake.hazardlib.const import StdDev
 from openquake.hazardlib.gsim.base import ContextMaker
+from openquake.hazardlib.gsim.multi import MultiGMPE
 from openquake.hazardlib.imt import from_string
 
 
@@ -118,7 +119,11 @@ class GmfComputer(object):
         result = numpy.zeros(
             (len(self.imts), len(self.sids), num_events), numpy.float32)
         for imti, imt in enumerate(self.imts):
-            result[imti] = self._compute(None, gsim, num_events, imt)
+            if isinstance(gsim, MultiGMPE):
+                gs = gsim[str(imt)]  # MultiGMPE
+            else:
+                gs = gsim  # regular GMPE
+            result[imti] = self._compute(None, gs, num_events, imt)
         return result
 
     def _compute(self, seed, gsim, num_events, imt):
@@ -178,7 +183,7 @@ class GmfComputer(object):
 
             if self.correlation_model is not None:
                 ir = self.correlation_model.apply_correlation(
-                    self.sites, imt, intra_residual)
+                    self.sites, imt, intra_residual, stddev_intra)
                 # this fixes a mysterious bug: ir[row] is actually
                 # a matrix of shape (E, 1) and not a vector of size E
                 intra_residual = numpy.zeros(ir.shape)

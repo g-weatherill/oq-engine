@@ -78,6 +78,22 @@ class CostCalculator(object):
         # this should never happen
         raise RuntimeError('Unable to compute cost')
 
+    def get_units(self, loss_types):
+        """
+        :param: a list of loss types
+        :returns: an array of units as byte strings, suitable for HDF5
+        """
+        lst = []
+        for lt in loss_types:
+            if lt.endswith('_ins'):
+                lt = lt[:-4]
+            if lt == 'occupants':
+                unit = 'people'
+            else:
+                unit = self.units[lt]
+            lst.append(encode(unit))
+        return numpy.array(lst)
+
     def __toh5__(self):
         loss_types = sorted(self.cost_types)
         dt = numpy.dtype([('cost_type', hdf5.vstr),
@@ -99,6 +115,7 @@ class CostCalculator(object):
 
     def __repr__(self):
         return '<%s %s>' % (self.__class__.__name__, vars(self))
+
 
 costcalculator = CostCalculator(
     cost_types=dict(structural='per_area'),
@@ -393,23 +410,6 @@ class AssetCollection(object):
         """
         return self.array['taxonomy']
 
-    def units(self, loss_types):
-        """
-        :param: a list of loss types
-        :returns: an array of units as byte strings, suitable for HDF5
-        """
-        units = self.cost_calculator.units
-        lst = []
-        for lt in loss_types:
-            if lt.endswith('_ins'):
-                lt = lt[:-4]
-            if lt == 'occupants':
-                unit = 'people'
-            else:
-                unit = units[lt]
-            lst.append(encode(unit))
-        return numpy.array(lst)
-
     def assets_by_site(self):
         """
         :returns: numpy array of lists with the assets by each site
@@ -604,6 +604,7 @@ def build_asset_array(assets_by_site, tagnames=()):
                 record[field] = value
     return assetcol, ' '.join(occupancy_periods)
 
+
 # ########################### exposure ############################ #
 
 cost_type_dt = numpy.dtype([('name', hdf5.vstr),
@@ -774,7 +775,7 @@ class Exposure(object):
         expected_header = self._csv_header()
         fnames = [os.path.join(dirname, f) for f in csvnames.split()]
         for fname in fnames:
-            with open(fname) as f:
+            with open(fname, encoding='utf-8') as f:
                 fields = next(csv.reader(f))
                 header = set(fields)
                 if len(header) < len(fields):
@@ -787,7 +788,7 @@ class Exposure(object):
                         (fname, sorted(expected_header), sorted(header)))
         occupancy_periods = self.occupancy_periods.split()
         for fname in fnames:
-            with open(fname) as f:
+            with open(fname, encoding='utf-8') as f:
                 for i, dic in enumerate(csv.DictReader(f), 1):
                     asset = Node('asset', lineno=i)
                     with context(fname, asset):

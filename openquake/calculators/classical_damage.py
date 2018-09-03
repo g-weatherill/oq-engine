@@ -23,12 +23,12 @@ from openquake.hazardlib import stats
 from openquake.calculators import base, classical_risk
 
 
-def classical_damage(riskinput, riskmodel, param, monitor):
+def classical_damage(riskinputs, riskmodel, param, monitor):
     """
     Core function for a classical damage computation.
 
-    :param riskinput:
-        a :class:`openquake.risklib.riskinput.RiskInput` object
+    :param riskinputs:
+        :class:`openquake.risklib.riskinput.RiskInput` objects
     :param riskmodel:
         a :class:`openquake.risklib.riskinput.CompositeRiskModel` instance
     :param param:
@@ -38,12 +38,12 @@ def classical_damage(riskinput, riskmodel, param, monitor):
     :returns:
         a nested dictionary rlz_idx -> asset -> <damage array>
     """
-    R = riskinput.hazard_getter.num_rlzs
-    result = {i: AccumDict() for i in range(R)}
-    for outputs in riskmodel.gen_outputs(riskinput, monitor):
-        for l, out in enumerate(outputs):
-            ordinals = [a.ordinal for a in outputs.assets]
-            result[outputs.rlzi] += dict(zip(ordinals, out))
+    result = AccumDict(accum=AccumDict())
+    for ri in riskinputs:
+        for outputs in riskmodel.gen_outputs(ri, monitor):
+            for l, out in enumerate(outputs):
+                ordinals = [a.ordinal for a in outputs.assets]
+                result[l, outputs.rlzi] += dict(zip(ordinals, out))
     return result
 
 
@@ -59,12 +59,12 @@ class ClassicalDamageCalculator(classical_risk.ClassicalRiskCalculator):
         Export the result in CSV format.
 
         :param result:
-            a dictionary asset -> fractions per damage state
+            a dictionary (l, r) -> asset_ordinal -> fractions per damage state
         """
         damages_dt = numpy.dtype([(ds, numpy.float32)
                                   for ds in self.riskmodel.damage_states])
-        damages = numpy.zeros((self.A, self.R), damages_dt)
-        for r in result:
-            for aid, fractions in result[r].items():
-                damages[aid, r] = tuple(fractions)
+        damages = numpy.zeros((self.A, self.R, self.L * self.I), damages_dt)
+        for l, r in result:
+            for aid, fractions in result[l, r].items():
+                damages[aid, r, l] = tuple(fractions)
         stats.set_rlzs_stats(self.datastore, 'damages', damages)
