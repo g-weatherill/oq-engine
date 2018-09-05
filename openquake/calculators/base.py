@@ -31,7 +31,7 @@ import numpy
 from openquake.baselib import (
     config, general, hdf5, datastore, __version__ as engine_version)
 from openquake.baselib.performance import perf_dt, Monitor
-from openquake.hazardlib.calc.filters import SourceFilter, RtreeFilter, rtree
+from openquake.hazardlib.calc.filters import SourceFilter, RtreeFilter
 from openquake.risklib import riskinput, riskmodels
 from openquake.commonlib import readinput, source, calc, writers
 from openquake.baselib.parallel import Starmap
@@ -325,7 +325,7 @@ class HazardCalculator(BaseCalculator):
         :returns: (filtered CompositeSourceModel, SourceFilter)
         """
         oq = self.oqparam
-        mon = self.monitor('prefilter')
+        mon = self.monitor('preprocess')
         self.hdf5cache = self.datastore.hdf5cache()
         src_filter = SourceFilter(self.sitecol.complete, oq.maximum_distance,
                                   self.hdf5cache)
@@ -346,10 +346,14 @@ class HazardCalculator(BaseCalculator):
             logging.info('Prefiltering the sources with rtree')
             prefilter = RtreeFilter(self.sitecol.complete, oq.maximum_distance,
                                     self.hdf5cache)
-            csm = self.csm.pfilter(prefilter, param, mon)
+            sources_by_grp = prefilter.pfilter(
+                self.csm.get_sources(), param, mon)
+            csm = self.csm.new(sources_by_grp)
         else:
             logging.info('Prefiltering the sources with numpy')
-            csm = self.csm.pfilter(src_filter, param, mon)
+            sources_by_grp = src_filter.pfilter(
+                self.csm.get_sources(), param, mon)
+            csm = self.csm.new(sources_by_grp)
         logging.info('There are %d realizations', csm.info.get_num_rlzs())
         return src_filter, csm
 
@@ -375,6 +379,13 @@ class HazardCalculator(BaseCalculator):
     def check_overflow(self):
         """Overridden in event based"""
 
+    def check_floating_spinning(self):
+        f, s = self.csm.get_floating_spinning_factors()
+        if f != 1:
+            logging.info('Rupture floating factor=%s', f)
+        if s != 1:
+            logging.info('Rupture spinning factor=%s', s)
+
     def read_inputs(self):
         """
         Read risk data and sources if any
@@ -389,20 +400,10 @@ class HazardCalculator(BaseCalculator):
             with self.monitor('splitting sources', measuremem=1, autoflush=1):
                 logging.info('Splitting sources')
                 self.csm.split_all(oq.minimum_magnitude)
-            if self.is_stochastic:
-                # initialize the rupture serial numbers before filtering; in
-                # this way the serials are independent from the site collection
-                # this is ultra-fast
-                self.csm.init_serials(oq.ses_seed)
-            f, s = self.csm.get_floating_spinning_factors()
-            if f != 1:
-                logging.info('Rupture floating factor=%s', f)
-            if s != 1:
-                logging.info('Rupture spinning factor=%s', s)
             self.csm.info.gsim_lt.check_imts(oq.imtls)
             self.csm.info.gsim_lt.store_gmpe_tables(self.datastore)
             self.rup_data = {}
-        self.init()
+        self.init()  # do this at the end of pre-execute
 
     def pre_execute(self, pre_calculator=None):
         """
@@ -477,6 +478,7 @@ class HazardCalculator(BaseCalculator):
         elif 'csm_info' in self.datastore:
             self.rlzs_assoc = self.datastore['csm_info'].get_rlzs_assoc()
         elif hasattr(self, 'csm'):
+            self.check_floating_spinning()
             self.rlzs_assoc = self.csm.info.get_rlzs_assoc()
             self.datastore['csm_info'] = self.csm.info
         else:  # build a fake; used by risk-from-file calculators
@@ -644,7 +646,7 @@ class HazardCalculator(BaseCalculator):
             raise RuntimeError('Empty logic tree: too much filtering?')
         self.datastore['csm_info'] = self.csm.info
         R = len(self.rlzs_assoc.realizations)
-        if self.is_stochastic and R >= TWO16:
+        if 'event_based' in self.oqparam.calculation_mode and R >= TWO16:
             # rlzi is 16 bit integer in the GMFs, so there is hard limit or R
             raise ValueError(
                 'The logic tree has %d realizations, the maximum '
@@ -659,40 +661,6 @@ class HazardCalculator(BaseCalculator):
                 'source_info', nbytes=array.nbytes,
                 has_dupl_sources=self.csm.has_dupl_sources)
         self.datastore.flush()
-
-    def save_hmaps(self):
-        """
-        Save hazard maps generated from the hazard curves
-        """
-        oq = self.oqparam
-        if oq.poes:
-            mon = self.monitor('computing hazard maps')
-            logging.info('Computing hazard maps for PoEs=%s', oq.poes)
-            with mon:
-                N = len(self.sitecol.complete)
-                ct = oq.concurrent_tasks or 1
-                if 'hcurves' in self.datastore:
-                    kinds = list(self.datastore['hcurves'])
-                    hmaps_dt = numpy.dtype(
-                        [('%s-%s' % (imt, poe), F32)
-                         for imt in oq.imtls for poe in oq.poes])
-                    for kind in kinds:
-                        self.datastore.create_dset(
-                            'hmaps/' + kind, hmaps_dt, (N,), fillvalue=None)
-                    allargs = []
-                    for slc in general.split_in_slices(N, ct):
-                        hcurves_by_kind = {
-                            kind: self.datastore['hcurves/' + kind][slc]
-                            for kind in kinds}
-                        allargs.append((hcurves_by_kind, slc,
-                                        oq.imtls, oq.poes, mon))
-                    for dic, slc in Starmap(build_hmaps, allargs, mon):
-                        for kind, hmaps in dic.items():
-                            self.datastore['hmaps/' + kind][slc] = hmaps
-                else:  # single realization
-                    pg = PmapGetter(self.datastore, self.rlzs_assoc)
-                    self.datastore['hmaps/mean'] = calc.make_hmap_array(
-                        pg.get_mean(), oq.imtls, oq.poes, N)
 
     def post_process(self):
         """For compatibility with the engine"""

@@ -70,8 +70,9 @@ def split_sources(srcs, min_mag):
             splits = list(src)
         split_time[src.source_id] = time.time() - t0
         sources.extend(splits)
+        has_serial = hasattr(src, 'serial')
+        has_samples = hasattr(src, 'samples')
         if len(splits) > 1:
-            has_serial = hasattr(src, 'serial')
             start = 0
             for i, split in enumerate(splits):
                 split.source_id = '%s:%s' % (src.source_id, i)
@@ -82,9 +83,15 @@ def split_sources(srcs, min_mag):
                     nr = split.num_ruptures
                     split.serial = src.serial[start:start + nr]
                     start += nr
+                if has_samples:
+                    split.samples = src.samples
         elif splits:  # single source
             splits[0].ngsims = src.ngsims
             splits[0].ndists = src.ndists
+            if has_serial:
+                splits[0].serial = src.serial
+            if has_samples:
+                splits[0].samples = src.samples
     return sources, split_time
 
 
@@ -772,17 +779,13 @@ class CompositeSourceModel(collections.Sequence):
         new.sm_id = sm_id
         return new
 
-    def pfilter(self, src_filter, param, monitor=performance.Monitor()):
+    def new(self, sources_by_grp):
         """
-        Generate a new CompositeSourceModel by filtering the sources on
-        the given site collection.
+        Generate a new CompositeSourceModel from the given dictionary.
 
-        :param src_filter: a SourceFilter instance
-        :param param: a dictionary of parameters including concurrent_tasks
-        :param monitor: a Monitor instance
+        :param sources_by_group: a dictionary grp_id -> sources
         :returns: a new CompositeSourceModel instance
         """
-        sources_by_grp = src_filter.pfilter(self.get_sources(), param, monitor)
         source_models = []
         for sm in self.source_models:
             src_groups = []
@@ -920,14 +923,14 @@ class CompositeSourceModel(collections.Sequence):
         Generate unique seeds for each rupture with numpy.arange.
         This should be called only in event based calculators
         """
-        n = sum(sg.tot_ruptures for sg in self.src_groups)
+        sources = self.get_sources()
+        n = sum(src.num_ruptures for src in sources)
         rup_serial = numpy.arange(ses_seed, ses_seed + n, dtype=numpy.uint32)
         start = 0
-        for sg in self.src_groups:
-            for src in sg:
-                nr = src.num_ruptures
-                src.serial = rup_serial[start:start + nr]
-                start += nr
+        for src in sources:
+            nr = src.num_ruptures
+            src.serial = rup_serial[start:start + nr]
+            start += nr
 
     def get_maxweight(self, weight, concurrent_tasks, minweight=MINWEIGHT):
         """

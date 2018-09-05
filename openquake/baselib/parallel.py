@@ -527,33 +527,21 @@ def init_workers():
     else:
         # if the parent dies, the children die
         prctl.set_pdeathsig(signal.SIGKILL)
-    return os.getpid()
-
-
-def _wakeup(sec, mon):
-    """Waiting function, used to wake up the process pool"""
-    time.sleep(sec)
-    return os.getpid()
 
 
 class Starmap(object):
-    task_ids = []
-    pids = []
     calc_id = None
     hdf5 = None
+    pids = ()
+    task_ids = []
 
     @classmethod
     def init(cls, poolsize=None, distribute=OQ_DISTRIBUTE):
         if distribute == 'processpool' and not hasattr(cls, 'pool'):
-            sigint_handler = signal.signal(signal.SIGINT, signal.SIG_IGN)
+            orig_handler = signal.signal(signal.SIGINT, signal.SIG_IGN)
             cls.pool = multiprocessing.Pool(poolsize, init_workers)
-            signal.signal(signal.SIGINT, sigint_handler)
-            m = Monitor('wakeup')
-            ires = cls(
-                _wakeup, [(.2, m) for _ in range(cls.pool._processes)]
-            ).submit_all(logging.debug)
-            cls.pids = list(ires)
-            cls.task_ids = []
+            signal.signal(signal.SIGINT, orig_handler)
+            cls.pids = [proc.pid for proc in cls.pool._pool]
         elif distribute == 'threadpool' and not hasattr(cls, 'pool'):
             cls.pool = multiprocessing.dummy.Pool(poolsize)
         elif distribute == 'no' and hasattr(cls, 'pool'):
@@ -687,11 +675,11 @@ class Starmap(object):
         return IterResult(it, self.name, self.argnames,
                           self.sent, self.monitor.hdf5)
 
-    def reduce(self, agg=operator.add, acc=None, progress=logging.info):
+    def reduce(self, agg=operator.add, acc=None):
         """
         Submit all tasks and reduce the results
         """
-        return self.submit_all(progress).reduce(agg, acc)
+        return self.submit_all().reduce(agg, acc)
 
     def __iter__(self):
         return iter(self.submit_all())
