@@ -118,6 +118,13 @@ site_param_dt = {
     'z2pt5': numpy.float64,
     'siteclass': (numpy.string_, 1),
     'backarc': numpy.bool,
+    'h800': numpy.float64,
+
+    # building code site parameters
+    "nehrp": (numpy.string, 3),
+    'ec8': (numpy.string_, 3),
+    'ec8_p18': (numpy.string_, 5),
+    'geology': (numpy.string_, 30),
 
     # parameters for geotechnic hazard
     'liquefaction_susceptibility': numpy.int16,
