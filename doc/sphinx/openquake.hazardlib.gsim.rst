@@ -684,6 +684,14 @@ nga_east
     :undoc-members:
     :show-inheritance:
 
+nga_east_site_model
+------------------------------------------
+
+.. automodule:: openquake.hazardlib.gsim.nga_east_site_model
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
 nrcan15_site_term
 ------------------------------------------
 
