@@ -450,6 +450,7 @@ class NGAEastBaseGMPE(GMPETable):
             deviation models. Float in the range 0 to 1, or None (mean value
             used)
         """
+        self.kwargs = {"gmpe_table": gmpe_table}
         self.tau_model = tau_model
         self.phi_model = phi_model
         self.phi_s2ss_model = phi_s2ss_model
@@ -464,7 +465,7 @@ class NGAEastBaseGMPE(GMPETable):
         self.phi_ss_quantile = phi_ss_quantile
         self.phi_s2ss_quantile = phi_s2ss_quantile
         self._setup_standard_deviations(fle=None)
-        super().__init__(gmpe_table=gmpe_table)
+        super().init(fle=None)
 
     def _setup_standard_deviations(self, fle):
         # setup tau
